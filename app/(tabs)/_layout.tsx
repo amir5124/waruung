@@ -1,59 +1,140 @@
-import React from 'react';
-import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { Link, Tabs } from 'expo-router';
-import { Pressable } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
+import { Tabs } from 'expo-router';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import Colors from '@/constants/Colors';
-import { useColorScheme } from '@/components/useColorScheme';
-import { useClientOnlyValue } from '@/components/useClientOnlyValue';
+const ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
+  index: 'home',
+  favorit: 'heart-outline',
+  pesanan: 'document-text-outline',
+  menu: 'menu-outline',
+};
 
-// You can explore the built-in icon families and icons on the web at https://icons.expo.fyi/
-function TabBarIcon(props: {
-  name: React.ComponentProps<typeof FontAwesome>['name'];
-  color: string;
-}) {
-  return <FontAwesome size={28} style={{ marginBottom: -3 }} {...props} />;
+const LABELS: Record<string, string> = {
+  index: 'Home',
+  favorit: 'Favorit',
+  pesanan: 'Pesanan',
+  menu: 'Menu',
+};
+
+function CustomTabBar({ state, navigation }: BottomTabBarProps) {
+  const insets = useSafeAreaInsets();
+
+  return (
+    <View style={[styles.wrapper, { bottom: 50 + insets.bottom * 0.3 }]}>
+      <View style={styles.tabBar}>
+        {state.routes.map((route, index) => {
+          const focused = state.index === index;
+          const iconName = ICONS[route.name] ?? 'ellipse-outline';
+          const label = LABELS[route.name] ?? route.name;
+
+          const onPress = () => {
+            const event = navigation.emit({
+              type: 'tabPress',
+              target: route.key,
+              canPreventDefault: true,
+            });
+
+            if (!focused && !event.defaultPrevented) {
+              navigation.navigate(route.name);
+            }
+          };
+
+          return (
+            <TouchableOpacity
+              key={route.key}
+              onPress={onPress}
+              style={styles.tabItem}
+              activeOpacity={0.8}
+            >
+              {focused ? (
+                <View style={styles.activeCircle}>
+                  <Ionicons name={iconName} size={24} color="#2F86EB" />
+                  <Text style={styles.activeLabel}>{label}</Text>
+                </View>
+              ) : (
+                <View style={styles.inactiveTab}>
+                  <Ionicons name={iconName} size={22} color="#FFFFFF" />
+                  <Text style={styles.inactiveLabel}>{label}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+    </View>
+  );
 }
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
-
   return (
     <Tabs
-      screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
-        // Disable the static render of the header on web
-        // to prevent a hydration error in React Navigation v6.
-        headerShown: useClientOnlyValue(false, true),
-      }}>
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Tab One',
-          tabBarIcon: ({ color }) => <TabBarIcon name="code" color={color} />,
-          headerRight: () => (
-            <Link href="/modal" asChild>
-              <Pressable>
-                {({ pressed }) => (
-                  <FontAwesome
-                    name="info-circle"
-                    size={25}
-                    color={Colors[colorScheme ?? 'light'].text}
-                    style={{ marginRight: 15, opacity: pressed ? 0.5 : 1 }}
-                  />
-                )}
-              </Pressable>
-            </Link>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="two"
-        options={{
-          title: 'Tab Two',
-          tabBarIcon: ({ color }) => <TabBarIcon name="code" color={color} />,
-        }}
-      />
+      tabBar={(props) => <CustomTabBar {...props} />}
+      screenOptions={{ headerShown: false }}
+    >
+      <Tabs.Screen name="index" options={{ title: 'Home' }} />
+      <Tabs.Screen name="favorit" options={{ title: 'Favorit' }} />
+      <Tabs.Screen name="pesanan" options={{ title: 'Pesanan' }} />
+      <Tabs.Screen name="menu" options={{ title: 'Menu' }} />
     </Tabs>
   );
 }
+
+const styles = StyleSheet.create({
+  wrapper: {
+    position: 'absolute',
+    left: 20,
+    right: 20,
+  },
+  tabBar: {
+    flexDirection: 'row',
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#4FA8E8',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowOffset: { width: 0, height: 4 },
+    shadowRadius: 10,
+    elevation: 8,
+    // TIDAK ada overflow: 'hidden' di sini, jadi anak bisa netes keluar
+  },
+  tabItem: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 72,
+  },
+  inactiveTab: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  inactiveLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  activeCircle: {
+    width: 70,
+    height: 70,
+    borderRadius: 48,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    borderWidth: 5,
+    borderColor: '#4FA8E8',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowOffset: { width: 0, height: 4 },
+    shadowRadius: 8,
+    elevation: 10,
+  },
+  activeLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#2F86EB',
+  },
+});

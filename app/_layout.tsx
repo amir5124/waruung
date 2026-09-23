@@ -1,59 +1,80 @@
-import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { useFonts } from 'expo-font';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Stack } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
-import { useEffect } from 'react';
-import 'react-native-reanimated';
+import { createContext, useContext, useEffect, useState } from 'react';
+import { ActivityIndicator, View } from 'react-native';
 
-import { useColorScheme } from '@/components/useColorScheme';
+const ONBOARDING_KEY = 'hasSeenOnboarding';
 
-export {
-  // Catch any errors thrown by the Layout component.
-  ErrorBoundary,
-} from 'expo-router';
-
-export const unstable_settings = {
-  // Ensure that reloading on `/modal` keeps a back button present.
-  initialRouteName: '(tabs)',
+// ---- Context supaya halaman lain bisa "memberi tahu" root layout ----
+type OnboardingContextType = {
+  markOnboardingComplete: () => void;
 };
 
-// Prevent the splash screen from auto-hiding before asset loading is complete.
-SplashScreen.preventAutoHideAsync();
+const OnboardingContext = createContext<OnboardingContextType>({
+  markOnboardingComplete: () => { },
+});
+
+export const useOnboarding = () => useContext(OnboardingContext);
 
 export default function RootLayout() {
-  const [loaded, error] = useFonts({
-    SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
-    ...FontAwesome.font,
-  });
-
-  // Expo Router uses Error Boundaries to catch errors in the navigation tree.
-  useEffect(() => {
-    if (error) throw error;
-  }, [error]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [hasSeenOnboarding, setHasSeenOnboarding] = useState(false);
 
   useEffect(() => {
-    if (loaded) {
-      SplashScreen.hideAsync();
+    let isMounted = true;
+
+    AsyncStorage.getItem(ONBOARDING_KEY)
+      .then((value) => {
+        if (isMounted) {
+          setHasSeenOnboarding(value === 'true');
+        }
+      })
+      .catch((error) => {
+        console.error('Gagal cek status onboarding:', error);
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Dipanggil dari onboarding.tsx saat user selesai/skip
+  const markOnboardingComplete = async () => {
+    try {
+      await AsyncStorage.setItem(ONBOARDING_KEY, 'true');
+    } catch (error) {
+      console.error('Gagal menyimpan status onboarding:', error);
+    } finally {
+      setHasSeenOnboarding(true); // ini yang bikin Stack.Protected switch ke (auth)
     }
-  }, [loaded]);
+  };
 
-  if (!loaded) {
-    return null;
+  if (isLoading) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff' }}>
+        <ActivityIndicator size="large" color="#40a3ea" />
+      </View>
+    );
   }
 
-  return <RootLayoutNav />;
-}
-
-function RootLayoutNav() {
-  const colorScheme = useColorScheme();
-
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
+    <OnboardingContext.Provider value={{ markOnboardingComplete }}>
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Protected guard={!hasSeenOnboarding}>
+          <Stack.Screen name="onboarding" />
+        </Stack.Protected>
+
+        <Stack.Protected guard={hasSeenOnboarding}>
+          <Stack.Screen name="(auth)" />
+          <Stack.Screen name="(tabs)" />
+          <Stack.Screen name="services" />
+        </Stack.Protected>
       </Stack>
-    </ThemeProvider>
+    </OnboardingContext.Provider>
   );
 }

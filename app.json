@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "waruung",
+    "name": "Waruung",
     "slug": "waruung",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -14,15 +14,29 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.waruung.app",
+      "config": {
+        "googleMapsApiKey": "AIzaSyCxfdljVSgNFeQKfEzNzeUJUuJVxSxntVQ"
+      }
     },
     "android": {
+      "package": "com.waruung.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyCxfdljVSgNFeQKfEzNzeUJUuJVxSxntVQ"
+        }
+      },
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -30,7 +44,15 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Waruung memerlukan akses lokasi untuk menentukan titik jemput dan menampilkan posisi kamu di peta.",
+          "locationAlwaysAndWhenInUsePermission": "Waruung memerlukan akses lokasi untuk mencari driver terdekat dan menampilkan posisi kamu di peta."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
