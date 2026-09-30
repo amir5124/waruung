@@ -1,35 +1,154 @@
-import type { PlaceLoc } from '@/types/ojek';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { api } from '@/lib/api';
+import { useCallback, useEffect, useState } from 'react';
 
 export type SavedKind = 'home' | 'office';
-type SavedMap = Record<SavedKind, PlaceLoc | null>;
 
-const KEY = 'ojek:saved-addresses:v1';
+export interface SavedPlace {
+    name: string;
+    address: string;
+    coords: { latitude: number; longitude: number };
+    placeId?: string;
+}
+
+/**
+ * Parse kolom `location` dari Supabase (geography point).
+ * Supabase PostgREST bisa mengirim dalam beberapa bentuk:
+ *  1. GeoJSON: { type: 'Point', coordinates: [lng, lat] }
+ *  2. WKT string: "POINT(lng lat)"
+ *  3. Object: { latitude, longitude }
+ *  4. String hex EWKB (jarang): "0101000020E610..."
+ */
+function parseLocation(loc: any): { latitude: number; longitude: number } {
+    console.log('[parseLocation] input:', typeof loc, JSON.stringify(loc));
+
+    if (!loc) {
+        console.warn('[parseLocation] loc null/undefined');
+        return { latitude: 0, longitude: 0 };
+    }
+
+    // 1. GeoJSON: { type: 'Point', coordinates: [lng, lat] }
+    if (
+        typeof loc === 'object' &&
+        loc.type === 'Point' &&
+        Array.isArray(loc.coordinates) &&
+        loc.coordinates.length >= 2
+    ) {
+        const [lng, lat] = loc.coordinates;
+        if (typeof lat === 'number' && typeof lng === 'number') {
+            console.log('[parseLocation] GeoJSON OK:', { lat, lng });
+            return { latitude: lat, longitude: lng };
+        }
+    }
+
+    // 2. Object dengan coordinates array (tanpa type)
+    if (typeof loc === 'object' && Array.isArray(loc.coordinates) && loc.coordinates.length >= 2) {
+        const [lng, lat] = loc.coordinates;
+        if (typeof lat === 'number' && typeof lng === 'number') {
+            console.log('[parseLocation] coords array OK:', { lat, lng });
+            return { latitude: lat, longitude: lng };
+        }
+    }
+
+    // 3. WKT string: "POINT(lng lat)"
+    if (typeof loc === 'string') {
+        const m = loc.match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
+        if (m) {
+            const lng = Number(m[1]);
+            const lat = Number(m[2]);
+            console.log('[parseLocation] WKT OK:', { lat, lng });
+            return { latitude: lat, longitude: lng };
+        }
+    }
+
+    // 4. Sudah object { latitude, longitude }
+    if (
+        typeof loc === 'object' &&
+        typeof loc.latitude === 'number' &&
+        typeof loc.longitude === 'number'
+    ) {
+        console.log('[parseLocation] object OK:', loc);
+        return { latitude: loc.latitude, longitude: loc.longitude };
+    }
+
+    console.warn('[parseLocation] FORMAT TIDAK DIKENALI:', JSON.stringify(loc));
+    return { latitude: 0, longitude: 0 };
+}
 
 export function useSavedAddresses() {
-    const [saved, setSaved] = useState<SavedMap>({ home: null, office: null });
-    const ref = useRef<SavedMap>(saved);
+    const [saved, setSaved] = useState<Record<SavedKind, SavedPlace | null>>({
+        home: null,
+        office: null,
+    });
+    const [loading, setLoading] = useState(true);
+
+    const refresh = useCallback(async () => {
+        try {
+            console.log('[SAVED] Fetch list dari backend...');
+            const list = await api.savedAddresses.list();
+            console.log('[SAVED] Raw list:', JSON.stringify(list, null, 2));
+
+            const next: Record<SavedKind, SavedPlace | null> = { home: null, office: null };
+
+            for (const item of list) {
+                if (item.kind === 'home' || item.kind === 'office') {
+                    const coords = parseLocation(item.location);
+                    console.log(`[SAVED] ${item.kind} → coords:`, coords);
+
+                    next[item.kind] = {
+                        name: item.name,
+                        address: item.address,
+                        coords,
+                        placeId: item.place_id ?? undefined,
+                    };
+                }
+            }
+            console.log('[SAVED] Parsed result:', JSON.stringify(next, null, 2));
+            setSaved(next);
+        } catch (err: any) {
+            console.warn('[SAVED] Gagal load:', err.message);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
 
     useEffect(() => {
-        AsyncStorage.getItem(KEY)
-            .then((v) => {
-                if (!v) return;
-                const next = { home: null, office: null, ...JSON.parse(v) } as SavedMap;
-                ref.current = next;
-                setSaved(next);
-            })
-            .catch(() => { });
-    }, []);
+        refresh();
+    }, [refresh]);
 
-    const save = useCallback(async (kind: SavedKind, place: PlaceLoc) => {
-        const next = { ...ref.current, [kind]: place };
-        ref.current = next;
-        setSaved(next);
-        try {
-            await AsyncStorage.setItem(KEY, JSON.stringify(next));
-        } catch { }
-    }, []);
+    const save = useCallback(
+        async (kind: SavedKind, place: SavedPlace) => {
+            console.log('[SAVED] Simpan', kind, '→', JSON.stringify(place));
+            if (
+                !place.coords ||
+                typeof place.coords.latitude !== 'number' ||
+                typeof place.coords.longitude !== 'number' ||
+                (place.coords.latitude === 0 && place.coords.longitude === 0)
+            ) {
+                throw new Error('Koordinat alamat tidak valid');
+            }
 
-    return { saved, save };
+            await api.savedAddresses.upsert({
+                kind,
+                name: place.name,
+                address: place.address,
+                place_id: place.placeId,
+                latitude: place.coords.latitude,
+                longitude: place.coords.longitude,
+            });
+            console.log('[SAVED] Tersimpan di backend, refresh...');
+            await refresh();
+        },
+        [refresh]
+    );
+
+    const remove = useCallback(
+        async (kind: SavedKind) => {
+            console.log('[SAVED] Hapus', kind);
+            await api.savedAddresses.remove(kind);
+            await refresh();
+        },
+        [refresh]
+    );
+
+    return { saved, loading, save, remove, refresh };
 }

@@ -1,12 +1,11 @@
 import type { Coords, PlaceLoc } from '@/types/ojek';
 
-// Satukan tipe lokasi dengan yang sudah dipakai di flow Ojek,
-// supaya tidak ada dua definisi PlaceLoc yang beda-beda (penyebab garis merah sebelumnya).
 export type { Coords, PlaceLoc };
 
 export type ContactInfo = {
     name: string;
     phone: string;
+    landmark?: string;
 };
 
 export type PackageSize = 'kecil' | 'sedang' | 'besar';
@@ -26,6 +25,7 @@ export type GoSendCourierOption = {
     tag?: string;
     eta: string;
     price: number;
+    tariffCode?: string;
 };
 
 export type OrderPayload = {
@@ -41,13 +41,17 @@ export type DriverInfo = {
     id: string;
     name: string;
     rating: number;
+    totalTrips?: number;
     photoUrl?: string;
+    vehicleType: 'motor' | 'mobil' | 'motor_food';
     vehiclePlate: string;
     vehicleModel: string;
     phone: string;
-    coords: Coords; // posisi driver saat ini
+    coords: Coords;
     etaMinutes: number;
 };
+
+export type DriverStatus = 'searching' | 'pending' | 'accepted' | 'arrived';
 
 export type GoSendStep =
     | 'home'
@@ -59,4 +63,4 @@ export type GoSendStep =
     | 'package-options'
     | 'package-size'
     | 'searching-driver'
-    | 'driver-found'; // ⬅️ tambahkan ini
+    | 'driver-found';

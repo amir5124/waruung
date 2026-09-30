@@ -5,7 +5,7 @@ import * as Location from 'expo-location';
 // Setelah mengubah .env, restart Metro:  npx expo start -c
 // Key ini dipanggil lewat fetch, jadi JANGAN dibatasi ke "Android apps" (request akan ditolak).
 // Batasi saja ke API yang dipakai. Key native peta (app.json) adalah key terpisah.
-const API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY ?? 'AIzaSyCxfdljVSgNFeQKfEzNzeUJUuJVxSxntVQ';
+const API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY ?? 'AIzaSyCQOfitYRU7iAHMRaj0dwcrI8-UQIiFPWI';
 
 /**
  * 'legacy' -> "Places API" biasa   (aktifkan: Places API)
@@ -291,12 +291,44 @@ async function directionsLegacy(origin: Coords, destination: Coords): Promise<Ro
     }
 }
 
+/**
+ * Cek apakah koordinat valid (bukan 0,0, bukan NaN, bukan undefined).
+ */
+function isValidCoords(c: any): c is Coords {
+    return (
+        c &&
+        typeof c.latitude === 'number' &&
+        typeof c.longitude === 'number' &&
+        Number.isFinite(c.latitude) &&
+        Number.isFinite(c.longitude) &&
+        !(c.latitude === 0 && c.longitude === 0)
+    );
+}
+
 export async function getRoute(origin: Coords, destination: Coords): Promise<RouteInfo> {
+    // Guard: kalau koordinat tidak valid, langsung return garis lurus
+    if (!isValidCoords(origin) || !isValidCoords(destination)) {
+        console.warn('[getRoute] koordinat tidak valid, pakai garis lurus', {
+            origin,
+            destination,
+        });
+        const dist = isValidCoords(origin) && isValidCoords(destination)
+            ? haversine(origin, destination) * 1.3
+            : 0;
+        return {
+            distanceMeters: dist,
+            durationSec: dist / 8.3,
+            polyline: [origin, destination].filter(isValidCoords),
+            isEstimate: true,
+        };
+    }
+
     // 1) Routes API  2) Directions API biasa  3) garis lurus (perkiraan)
     const viaRoutes = await routesApi(origin, destination);
     if (viaRoutes) return viaRoutes;
     const viaDirections = await directionsLegacy(origin, destination);
     if (viaDirections) return viaDirections;
+
     const dist = haversine(origin, destination) * 1.3;
     return { distanceMeters: dist, durationSec: dist / 8.3, polyline: [origin, destination], isEstimate: true };
 }

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "996087781929",
+    "project_id": "waruung-36d8e",
+    "storage_bucket": "waruung-36d8e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:996087781929:android:1859c0f9f0064cd9909a38",
+        "android_client_info": {
+          "package_name": "com.waruung.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCC3d0PhR18n0X_L32eUwv9Sg9gCi7AHPQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

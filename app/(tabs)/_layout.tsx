@@ -8,14 +8,14 @@ const ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
   index: 'home',
   favorit: 'heart-outline',
   pesanan: 'document-text-outline',
-  menu: 'menu-outline',
+  menu: 'person-outline', // 🔧 dulunya 'menu-outline' -> icon profile/account
 };
 
 const LABELS: Record<string, string> = {
   index: 'Home',
   favorit: 'Favorit',
   pesanan: 'Pesanan',
-  menu: 'Menu',
+  menu: 'Akun', // 🔧 dulunya 'Menu' -> label disesuaikan jadi Akun (opsional, sesuaikan selera)
 };
 
 function CustomTabBar({ state, navigation }: BottomTabBarProps) {
@@ -76,7 +76,7 @@ export default function TabLayout() {
       <Tabs.Screen name="index" options={{ title: 'Home' }} />
       <Tabs.Screen name="favorit" options={{ title: 'Favorit' }} />
       <Tabs.Screen name="pesanan" options={{ title: 'Pesanan' }} />
-      <Tabs.Screen name="menu" options={{ title: 'Menu' }} />
+      <Tabs.Screen name="menu" options={{ title: 'Akun' }} />
     </Tabs>
   );
 }

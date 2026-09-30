@@ -1,13 +1,30 @@
-import { calcFare, formatRupiah, RideOption, SERVICES } from '@/constants/ojek-services';
+import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
+import { useTariffs } from '@/hooks/use-tariffs';
+import { Tariff } from '@/lib/api';
 import { getRoute } from '@/services/google-maps';
 import type { OrderPayload, PlaceLoc, RouteInfo, ServiceType } from '@/types/ojek';
-import { Ionicons } from '@expo/vector-icons';
+import { AntDesign, Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import {
+    ActivityIndicator,
+    Image,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    useWindowDimensions,
+    View,
+} from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import MapView, { Marker, Polyline } from 'react-native-maps';
-import Animated, { FadeInUp, useAnimatedStyle, useSharedValue, withSpring, withTiming } from 'react-native-reanimated';
+import Animated, {
+    FadeInUp,
+    useAnimatedStyle,
+    useSharedValue,
+    withSpring,
+    withTiming,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CircleButton, MAP_PROVIDER } from './parts';
 
@@ -17,15 +34,11 @@ type Props = {
     destination: PlaceLoc;
     onBack: () => void;
     onOrder: (p: OrderPayload) => void;
-    /** tombol "Tambah" di kartu asal-tujuan -> buka halaman pencarian */
     onEdit: () => void;
     paymentLabel?: string;
-    /** banner biru di atas metode bayar. Kirim '' untuk menyembunyikan */
     voucherText?: string;
     onVoucherPress?: () => void;
-    /** pil "Diskon" di kanan metode bayar. Kirim '' untuk menyembunyikan */
     discountLabel?: string;
-    /** pil di samping tombol kembali. Kirim '' untuk menyembunyikan */
     businessLabel?: string;
     onBusinessPress?: () => void;
 };
@@ -35,22 +48,28 @@ const VEHICLE_IMG = {
     mobil: require('@/assets/images/mobil.png'),
 };
 
-// Marker pakai gambar (paling stabil di Android). File @2x/@3x dipilih otomatis sesuai layar.
 const MARKER_IMG = {
     origin: require('@/assets/images/marker-origin.png'),
     destination: require('@/assets/images/marker-destination.png'),
 };
 
-// Warna tambahan di luar tema
 const ORANGE = '#f26b21';
 const CYAN = '#12a8d8';
-const CYAN_DARK = '#0b93c0';
 const CORAL = '#ee6c6c';
 
-// ---- saldo dummy untuk simulasi cek kecukupan saldo ----
 const DUMMY_SALDO = 50000;
 
-/** ikon bulat kecil di kartu asal-tujuan */
+function isValidCoords(c: any): boolean {
+    return (
+        c &&
+        typeof c.latitude === 'number' &&
+        typeof c.longitude === 'number' &&
+        Number.isFinite(c.latitude) &&
+        Number.isFinite(c.longitude) &&
+        !(c.latitude === 0 && c.longitude === 0)
+    );
+}
+
 function RouteDot({ type }: { type: 'origin' | 'destination' }) {
     if (type === 'origin') {
         return (
@@ -67,9 +86,19 @@ function RouteDot({ type }: { type: 'origin' | 'destination' }) {
 }
 
 function OptionRow({
-    option, service, price, selected, loading, onPress,
+    option,
+    service,
+    price,
+    selected,
+    loading,
+    onPress,
 }: {
-    option: RideOption; service: ServiceType; price: number; selected: boolean; loading: boolean; onPress: () => void;
+    option: Tariff;
+    service: ServiceType;
+    price: number;
+    selected: boolean;
+    loading: boolean;
+    onPress: () => void;
 }) {
     return (
         <Pressable onPress={onPress} style={[s.option, selected && { backgroundColor: colors.primarySoft }]}>
@@ -78,17 +107,25 @@ function OptionRow({
             </View>
             <View style={{ flex: 1 }}>
                 <View style={s.nameRow}>
-                    <Text style={s.optionName} numberOfLines={1}>{option.name}</Text>
+                    <Text style={s.optionName} numberOfLines={1}>
+                        {option.label}
+                    </Text>
                 </View>
                 <View style={s.meta}>
-                    <Text style={s.eta}>{option.eta}</Text>
+                    <Text style={s.eta}>{option.eta_min} mnt</Text>
                     <View style={s.dot} />
                     <Ionicons name="person" size={12} color={colors.textMuted} />
                     <Text style={s.metaText}>{option.capacity} penumpang</Text>
                 </View>
-                <Text style={s.optionDesc}>{option.desc}</Text>
+                {!!option.desc_text && (
+                    <Text style={s.optionDesc}>{option.desc_text}</Text>
+                )}
             </View>
-            {loading ? <ActivityIndicator size="small" color={colors.primary} /> : <Text style={s.price}>{formatRupiah(price)}</Text>}
+            {loading ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+            ) : (
+                <Text style={s.price}>{formatRupiah(price)}</Text>
+            )}
             <View style={s.separator} />
         </Pressable>
     );
@@ -117,9 +154,33 @@ export default function OrderStep({
 
     const [service, setService] = useState<ServiceType>(serviceType);
     const [route, setRoute] = useState<RouteInfo | null>(null);
-    const [selectedId, setSelectedId] = useState<string>(SERVICES[serviceType].options[0].id);
+    const [routeError, setRouteError] = useState(false);
+    const [selectedId, setSelectedId] = useState<string | null>(null);
 
-    // ---- bottom sheet yang bisa ditarik (2 posisi: penuh / ringkas) ----
+    // ---- Tarif dari backend ----
+    const { tariffs, loading: tariffsLoading, calcPrice } = useTariffs(service);
+
+    // Auto-pilih opsi pertama saat tariffs siap
+    useEffect(() => {
+        if (!selectedId && tariffs.length > 0) {
+            setSelectedId(tariffs[0].code);
+        }
+    }, [tariffs, selectedId]);
+
+    const coordsValid =
+        isValidCoords(origin?.coords) && isValidCoords(destination?.coords);
+
+    useEffect(() => {
+        if (!coordsValid) {
+            console.warn('[OrderStep] koordinat tidak valid saat mount', {
+                origin: origin?.coords,
+                destination: destination?.coords,
+            });
+            setRouteError(true);
+        }
+    }, [coordsValid, origin?.coords, destination?.coords]);
+
+    // ---- bottom sheet drag ----
     const sheetH = useSharedValue(EXPANDED);
     const startH = useSharedValue(EXPANDED);
     const SPRING = { damping: 24, stiffness: 240 };
@@ -135,7 +196,13 @@ export default function OrderStep({
         })
         .onEnd((e) => {
             const target =
-                e.velocityY < -500 ? EXPANDED : e.velocityY > 500 ? COLLAPSED : sheetH.value > MID ? EXPANDED : COLLAPSED;
+                e.velocityY < -500
+                    ? EXPANDED
+                    : e.velocityY > 500
+                        ? COLLAPSED
+                        : sheetH.value > MID
+                            ? EXPANDED
+                            : COLLAPSED;
             sheetH.value = withSpring(target, SPRING);
         });
     const tap = Gesture.Tap().onEnd(() => {
@@ -145,18 +212,51 @@ export default function OrderStep({
     const sheetStyle = useAnimatedStyle(() => ({ height: sheetH.value }));
     const floatStyle = useAnimatedStyle(() => ({ bottom: sheetH.value + 12 }));
 
-    // ---- rute ----
+    // ---- Ambil rute ----
     useEffect(() => {
+        if (!coordsValid) {
+            setRoute({
+                distanceMeters: 0,
+                durationSec: 0,
+                polyline: [origin.coords, destination.coords],
+                isEstimate: true,
+            });
+            return;
+        }
+
         let alive = true;
-        getRoute(origin.coords, destination.coords).then((r) => alive && setRoute(r));
+        setRouteError(false);
+
+        getRoute(origin.coords, destination.coords)
+            .then((r) => {
+                if (!alive) return;
+                setRoute(r);
+                if (r.isEstimate) setRouteError(true);
+            })
+            .catch((err) => {
+                if (!alive) return;
+                console.warn('[OrderStep] getRoute gagal:', err?.message);
+                setRouteError(true);
+                setRoute({
+                    distanceMeters: 0,
+                    durationSec: 0,
+                    polyline: [origin.coords, destination.coords],
+                    isEstimate: true,
+                });
+            });
+
         return () => {
             alive = false;
         };
-    }, [origin.coords, destination.coords]);
+    }, [origin.coords, destination.coords, coordsValid]);
 
     const fit = () => {
-        const pts = route?.polyline?.length ? route.polyline : [origin.coords, destination.coords];
-        mapRef.current?.fitToCoordinates(pts, {
+        const pts =
+            route?.polyline?.length
+                ? route.polyline
+                : [origin.coords, destination.coords].filter(isValidCoords);
+        if (pts.length < 1) return;
+        mapRef.current?.fitToCoordinates(pts as any, {
             edgePadding: { top: insets.top + 130, bottom: EXPANDED + 70, left: 60, right: 60 },
             animated: true,
         });
@@ -165,16 +265,19 @@ export default function OrderStep({
         if (route) fit();
     }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const options = SERVICES[service].options;
-    const selected = useMemo(() => options.find((o) => o.id === selectedId) ?? options[0], [options, selectedId]);
-    const priceOf = (o: RideOption) => calcFare(o, route?.distanceMeters ?? 0);
+    // ---- Pilihan ----
+    const selected = useMemo(() => {
+        if (!tariffs.length) return null;
+        return tariffs.find((o) => o.code === selectedId) ?? tariffs[0];
+    }, [tariffs, selectedId]);
 
-    // ---- saldo dinamis: biru kalau cukup, merah kalau kurang ----
-    const currentPrice = priceOf(selected);
+    const priceOf = (t: Tariff) => calcPrice(t.code, route?.distanceMeters ?? 0);
+
+    const currentPrice = selected ? priceOf(selected) : 0;
     const isSaldoEnough = DUMMY_SALDO >= currentPrice;
     const saldoText = `Saldo: ${formatRupiah(DUMMY_SALDO)}`;
 
-    // ---- tab (garis bawah mengikuti lebar teks tab aktif) ----
+    // ---- tab indicator ----
     const tabPos = useRef<Record<ServiceType, { x: number; w: number }>>({
         motor: { x: 0, w: 0 },
         mobil: { x: 0, w: 0 },
@@ -191,7 +294,8 @@ export default function OrderStep({
 
     const switchService = (t: ServiceType) => {
         setService(t);
-        setSelectedId(SERVICES[t].options[0].id);
+        // Reset selected; akan auto-pilih lagi setelah tariffs fetch selesai
+        setSelectedId(null);
         moveIndicator(t);
     };
 
@@ -199,6 +303,9 @@ export default function OrderStep({
         width: indW.value,
         transform: [{ translateX: indX.value }],
     }));
+
+    const canOrder =
+        coordsValid && !!route && !routeError && route.distanceMeters > 0 && !!selected;
 
     return (
         <GestureHandlerRootView style={{ flex: 1 }}>
@@ -209,45 +316,85 @@ export default function OrderStep({
                 toolbarEnabled={false}
                 rotateEnabled={false}
                 onMapReady={fit}
-                initialRegion={{ ...origin.coords, latitudeDelta: 0.05, longitudeDelta: 0.05 }}
+                initialRegion={{
+                    ...(isValidCoords(origin?.coords)
+                        ? origin.coords
+                        : { latitude: -6.2, longitude: 106.63 }),
+                    latitudeDelta: 0.05,
+                    longitudeDelta: 0.05,
+                }}
             >
-                {route && (
+                {route?.polyline && route.polyline.length >= 2 && (
                     <>
-                        <Polyline coordinates={route.polyline} strokeColor="#ffffff" strokeWidth={9} lineCap="round" lineJoin="round" />
-                        <Polyline coordinates={route.polyline} strokeColor={colors.primary} strokeWidth={5} lineCap="round" lineJoin="round" />
+                        <Polyline
+                            coordinates={route.polyline}
+                            strokeColor="#ffffff"
+                            strokeWidth={9}
+                            lineCap="round"
+                            lineJoin="round"
+                        />
+                        <Polyline
+                            coordinates={route.polyline}
+                            strokeColor={colors.primary}
+                            strokeWidth={5}
+                            lineCap="round"
+                            lineJoin="round"
+                        />
                     </>
                 )}
-                <Marker coordinate={origin.coords} image={MARKER_IMG.origin} anchor={{ x: 0.5, y: 1 }} title={origin.name} description="Titik jemput" zIndex={2} />
-                <Marker coordinate={destination.coords} image={MARKER_IMG.destination} anchor={{ x: 0.5, y: 1 }} title={destination.name} description="Tujuan" zIndex={2} />
+                {isValidCoords(origin?.coords) && (
+                    <Marker
+                        coordinate={origin.coords}
+                        image={MARKER_IMG.origin}
+                        anchor={{ x: 0.5, y: 1 }}
+                        title={origin.name}
+                        description="Titik jemput"
+                        zIndex={2}
+                    />
+                )}
+                {isValidCoords(destination?.coords) && (
+                    <Marker
+                        coordinate={destination.coords}
+                        image={MARKER_IMG.destination}
+                        anchor={{ x: 0.5, y: 1 }}
+                        title={destination.name}
+                        description="Tujuan"
+                        zIndex={2}
+                    />
+                )}
             </MapView>
 
-            {/* kartu asal-tujuan + tombol Tambah */}
+            {/* Kartu asal-tujuan */}
             <Animated.View entering={FadeInUp.duration(300)} style={[s.routeCard, { top: insets.top + 12 }]}>
                 <View style={{ flex: 1 }}>
                     <View style={s.routeRow}>
                         <RouteDot type="origin" />
-                        <Text style={s.routeText} numberOfLines={1}>{origin.name}</Text>
+                        <Text style={s.routeText} numberOfLines={1}>
+                            {origin.name || 'Titik jemput'}
+                        </Text>
                     </View>
                     <View style={s.routeDivider} />
                     <View style={s.routeRow}>
                         <RouteDot type="destination" />
-                        <Text style={s.routeText} numberOfLines={1}>{destination.name}</Text>
+                        <Text style={s.routeText} numberOfLines={1}>
+                            {destination.name || 'Tujuan'}
+                        </Text>
                     </View>
                 </View>
                 <Pressable onPress={onEdit} style={s.addBtn}>
-                    <Ionicons name="add-circle" size={26} color={ORANGE} />
+                    <AntDesign name="edit" size={20} color={ORANGE} />
                     <Text style={s.addText}>Edit</Text>
                 </Pressable>
             </Animated.View>
 
-            {/* tombol kembali, menempel di atas sheet */}
+            {/* Tombol back */}
             <Animated.View pointerEvents="box-none" style={[s.floatRow, floatStyle]}>
                 <View style={s.floatBack}>
                     <CircleButton icon="arrow-back" onPress={onBack} />
                 </View>
             </Animated.View>
 
-            {/* bottom sheet */}
+            {/* Bottom sheet */}
             <Animated.View style={[s.sheet, sheetStyle]}>
                 <GestureDetector gesture={pan}>
                     <View>
@@ -270,7 +417,9 @@ export default function OrderStep({
                                         if (t === service) moveIndicator(t, false);
                                     }}
                                 >
-                                    <Text style={[s.tabText, service === t && { color: colors.primary }]}>{SERVICES[t].label}</Text>
+                                    <Text style={[s.tabText, service === t && { color: colors.primary }]}>
+                                        {t === 'motor' ? 'Motor' : 'Mobil'}
+                                    </Text>
                                 </Pressable>
                             ))}
                             <Animated.View style={[s.indicator, indicator]} />
@@ -279,21 +428,43 @@ export default function OrderStep({
                 </GestureDetector>
 
                 <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-                    {options.map((o) => (
-                        <OptionRow
-                            key={o.id}
-                            option={o}
-                            service={service}
-                            price={priceOf(o)}
-                            loading={!route}
-                            selected={o.id === selected.id}
-                            onPress={() => setSelectedId(o.id)}
-                        />
-                    ))}
+                    {tariffsLoading && (
+                        <View style={{ padding: 20, alignItems: 'center' }}>
+                            <ActivityIndicator color={colors.primary} />
+
+                        </View>
+                    )}
+
+                    {!tariffsLoading && tariffs.length === 0 && (
+                        <View style={{ padding: 20, alignItems: 'center' }}>
+                            <Text style={{ color: colors.textMuted }}>
+                                Tarif belum tersedia untuk layanan ini.
+                            </Text>
+                        </View>
+                    )}
+
+                    {!tariffsLoading &&
+                        tariffs.map((o) => (
+                            <OptionRow
+                                key={o.code}
+                                option={o}
+                                service={service}
+                                price={priceOf(o)}
+                                loading={!route}
+                                selected={selected?.code === o.code}
+                                onPress={() => setSelectedId(o.code)}
+                            />
+                        ))}
                 </ScrollView>
 
                 <View style={[s.footer, { paddingBottom: insets.bottom + 12 }]}>
-                    {route?.isEstimate && <Text style={s.estimate}>Rute belum tersedia, harga berdasarkan perkiraan jarak.</Text>}
+                    {route?.isEstimate && (
+                        <Text style={s.estimate}>
+                            {routeError
+                                ? 'Rute tidak tersedia, harga berdasarkan perkiraan jarak.'
+                                : 'Rute belum tersedia, harga berdasarkan perkiraan jarak.'}
+                        </Text>
+                    )}
 
                     <View style={s.payLine}>
                         <Pressable style={{ flexShrink: 1 }}>
@@ -320,24 +491,28 @@ export default function OrderStep({
                     </View>
 
                     <Pressable
-                        disabled={!route}
-                        onPress={() =>
-                            route &&
+                        disabled={!canOrder || !selected}
+                        onPress={() => {
+                            if (!route || !selected) return;
                             onOrder({
                                 service,
-                                optionId: selected.id,
-                                optionName: selected.name,
+                                optionId: selected.code,
+                                optionName: selected.label,
                                 price: priceOf(selected),
                                 origin,
                                 destination,
                                 distanceMeters: route.distanceMeters,
                                 durationSec: route.durationSec,
-                            })
-                        }
-                        style={[s.cta, { opacity: route ? 1 : 0.6 }]}
+                            });
+                        }}
+                        style={[s.cta, { opacity: canOrder && selected ? 1 : 0.6 }]}
                     >
-                        <Text style={s.ctaText} numberOfLines={1}>Cari {selected.name}</Text>
-                        <Text style={s.ctaPrice}>{route ? formatRupiah(priceOf(selected)) : '…'}</Text>
+                        <Text style={s.ctaText} numberOfLines={1}>
+                            Cari {selected?.label ?? 'kendaraan'}
+                        </Text>
+                        <Text style={s.ctaPrice}>
+                            {route && selected ? formatRupiah(priceOf(selected)) : '…'}
+                        </Text>
                         <View style={s.ctaArrow}>
                             <Ionicons name="arrow-forward" size={18} color={colors.primary} />
                         </View>
@@ -395,23 +570,6 @@ const s = StyleSheet.create({
         justifyContent: 'center',
     },
     floatBack: { position: 'absolute', left: 0, top: 0, bottom: 0, justifyContent: 'center' },
-    bizPill: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 8,
-        height: 44,
-        paddingHorizontal: 16,
-        borderRadius: 22,
-        backgroundColor: '#fff',
-        borderWidth: 1.5,
-        borderColor: colors.primary,
-        elevation: 3,
-        shadowColor: '#000',
-        shadowOpacity: 0.12,
-        shadowRadius: 4,
-        shadowOffset: { width: 0, height: 1 },
-    },
-    bizText: { fontSize: 15, fontWeight: '800', color: colors.primary },
 
     sheet: {
         position: 'absolute',
@@ -432,9 +590,22 @@ const s = StyleSheet.create({
     tabs: { flexDirection: 'row', justifyContent: 'center', gap: 40 },
     tab: { paddingVertical: 10 },
     tabText: { fontSize: 16, fontWeight: '700', color: colors.textMuted },
-    indicator: { position: 'absolute', left: 0, bottom: 0, height: 3, borderRadius: 2, backgroundColor: colors.primary },
+    indicator: {
+        position: 'absolute',
+        left: 0,
+        bottom: 0,
+        height: 3,
+        borderRadius: 2,
+        backgroundColor: colors.primary,
+    },
 
-    option: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20, paddingVertical: 16 },
+    option: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 14,
+        paddingHorizontal: 20,
+        paddingVertical: 16,
+    },
     optionIcon: { width: 56, alignItems: 'center' },
     nameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
     optionName: { flexShrink: 1, fontSize: 17, fontWeight: '800', color: colors.text },
@@ -453,24 +624,26 @@ const s = StyleSheet.create({
         backgroundColor: colors.border,
     },
 
-    footer: { paddingHorizontal: 20, paddingTop: 12, gap: 12, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: '#fff' },
-    estimate: { fontSize: 12, color: colors.secondary },
-
-    voucher: {
-        height: 44,
-        borderRadius: 22,
-        backgroundColor: CYAN,
-        flexDirection: 'row',
-        alignItems: 'center',
-        overflow: 'hidden',
+    footer: {
+        paddingHorizontal: 20,
+        paddingTop: 12,
+        gap: 12,
+        borderTopWidth: 1,
+        borderTopColor: colors.border,
+        backgroundColor: '#fff',
     },
-    voucherText: { flex: 1, color: '#fff', fontSize: 15, paddingLeft: 20 },
-    voucherBtn: { height: '100%', paddingHorizontal: 24, justifyContent: 'center', backgroundColor: CYAN_DARK },
-    voucherBtnText: { color: '#fff', fontWeight: '800', fontSize: 15 },
+    estimate: { fontSize: 12, color: colors.secondary },
 
     payLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
     payRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-    payIcon: { width: 20, height: 20, borderRadius: 5, backgroundColor: CYAN, alignItems: 'center', justifyContent: 'center' },
+    payIcon: {
+        width: 20,
+        height: 20,
+        borderRadius: 5,
+        backgroundColor: CYAN,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
     payText: { fontWeight: '700', fontSize: 15, color: colors.text },
     balance: { marginTop: 2, fontSize: 13, fontWeight: '600' },
 
@@ -490,7 +663,14 @@ const s = StyleSheet.create({
         shadowRadius: 3,
         shadowOffset: { width: 0, height: 1 },
     },
-    discountIcon: { width: 20, height: 20, borderRadius: 10, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+    discountIcon: {
+        width: 20,
+        height: 20,
+        borderRadius: 10,
+        backgroundColor: colors.primary,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
     discountText: { fontSize: 14, fontWeight: '700', color: colors.text },
 
     cta: {
@@ -505,5 +685,12 @@ const s = StyleSheet.create({
     },
     ctaText: { flex: 1, color: '#fff', fontWeight: '800', fontSize: 16 },
     ctaPrice: { color: '#fff', fontWeight: '800', fontSize: 16, marginRight: 4 },
-    ctaArrow: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+    ctaArrow: {
+        width: 36,
+        height: 36,
+        borderRadius: 18,
+        backgroundColor: '#fff',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
 });

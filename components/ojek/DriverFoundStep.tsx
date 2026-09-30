@@ -4,8 +4,21 @@ import { getRoute } from '@/services/google-maps';
 import type { OrderPayload, RouteInfo, ServiceType } from '@/types/ojek';
 import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Image, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import {
+    Image,
+    Linking,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    View,
+} from 'react-native';
+import MapView, {
+    AnimatedRegion,
+    Marker,
+    MarkerAnimated,
+    Polyline,
+} from 'react-native-maps';
 import Animated, { FadeInUp } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CircleButton, MAP_PROVIDER } from './parts';
@@ -13,7 +26,6 @@ import { CircleButton, MAP_PROVIDER } from './parts';
 export type Driver = {
     id: string;
     name: string;
-    /** URL foto driver. Kalau kosong / gagal dimuat -> tampil inisial nama */
     photo?: string;
     rating: number;
     trips: number;
@@ -22,62 +34,49 @@ export type Driver = {
     color: string;
     phone: string;
     coords: { latitude: number; longitude: number };
+    vehicleType?: ServiceType;
 };
-
-/** DATA DUMMY untuk simulasi. Ganti dengan respons backend saat driver benar-benar ditemukan. */
-export function makeDummyDriver(service: ServiceType, near: { latitude: number; longitude: number }): Driver {
-    const coords = { latitude: near.latitude + 0.009, longitude: near.longitude - 0.006 };
-    if (service === 'motor') {
-        return {
-            id: 'drv-001',
-            name: 'Budi Santoso',
-            photo: 'https://i.pravatar.cc/200?img=12',
-            rating: 4.9,
-            trips: 1284,
-            plate: 'B 3421 KXR',
-            vehicle: 'Honda Vario 125',
-            color: 'Hitam',
-            phone: '081234567890',
-            coords,
-        };
-    }
-    return {
-        id: 'drv-002',
-        name: 'Agus Prasetyo',
-        photo: 'https://i.pravatar.cc/200?img=33',
-        rating: 4.8,
-        trips: 962,
-        plate: 'B 1188 TZP',
-        vehicle: 'Toyota Avanza',
-        color: 'Putih',
-        phone: '081298765432',
-        coords,
-    };
-}
 
 type Props = {
     payload: OrderPayload;
     driver: Driver;
     onBack: () => void;
     onCancel: () => void;
-    /** dipanggil sekali saat status berubah jadi "sudah sampai" di titik jemput */
     onArrived?: () => void;
-    /** buka layar chat (belum ada -> tombol tetap tampil) */
     onChat?: () => void;
-    /** default: buka dialer dengan nomor driver */
     onCall?: () => void;
 };
 
 const ORANGE = '#f26b21';
-const CORAL = '#ee6c6c';
 
-const VEHICLE_IMG = {
-    motor: require('@/assets/images/motor.png'),
-    mobil: require('@/assets/images/mobil.png'),
+const VEHICLE_IMG: Record<string, any> = {
+    motor: require('@/assets/images/motor-map.png'),
+    mobil: require('@/assets/images/mobil-map.png'),
 };
 const MARKER_ORIGIN = require('@/assets/images/marker-origin.png');
 
-const rupiahDots = (n: number) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+// Durasi animasi pindah posisi marker (ms)
+const MARKER_ANIM_MS = 800;
+// Jarak minimum (meter) supaya route di-refresh ulang
+const REFETCH_ROUTE_METERS = 100;
+
+type LatLng = { latitude: number; longitude: number };
+
+const rupiahDots = (n: number) =>
+    String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+
+function distanceMeters(a: LatLng, b: LatLng): number {
+    const R = 6371000;
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const dLat = toRad(b.latitude - a.latitude);
+    const dLon = toRad(b.longitude - a.longitude);
+    const x =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(a.latitude)) *
+        Math.cos(toRad(b.latitude)) *
+        Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(x));
+}
 
 function RouteDot({ type }: { type: 'origin' | 'destination' }) {
     if (type === 'origin') {
@@ -102,7 +101,13 @@ function Avatar({ name, uri }: { name: string; uri?: string }) {
         .map((w) => w[0]?.toUpperCase())
         .join('');
     if (uri && !failed) {
-        return <Image source={{ uri }} style={s.avatar} onError={() => setFailed(true)} />;
+        return (
+            <Image
+                source={{ uri }}
+                style={s.avatar}
+                onError={() => setFailed(true)}
+            />
+        );
     }
     return (
         <View style={[s.avatar, s.avatarFallback]}>
@@ -111,64 +116,133 @@ function Avatar({ name, uri }: { name: string; uri?: string }) {
     );
 }
 
-export default function DriverFoundStep({ payload, driver, onBack, onCancel, onArrived, onChat, onCall }: Props) {
+export default function DriverFoundStep({
+    payload,
+    driver,
+    onBack,
+    onCancel,
+    onArrived,
+    onChat,
+    onCall,
+}: Props) {
     const insets = useSafeAreaInsets();
     const mapRef = useRef<MapView>(null);
 
     const SHEET_H = 430 + insets.bottom;
 
     const [route, setRoute] = useState<RouteInfo | null>(null);
-    const [idx, setIdx] = useState(0);
     const [trackView, setTrackView] = useState(true);
-    const arrivedFiredRef = useRef(false);
+    const fittedRef = useRef(false);
+
     const onArrivedRef = useRef(onArrived);
     onArrivedRef.current = onArrived;
+    const arrivedFiredRef = useRef(false);
 
-    // rute driver -> titik jemput
+    // ---- Rute driver -> titik jemput, refresh kalau driver bergeser > 100m ----
+    const lastFetchRef = useRef<LatLng | null>(null);
+    const reqRef = useRef(0);
+    const mountedRef = useRef(true);
     useEffect(() => {
-        let alive = true;
-        getRoute(driver.coords, payload.origin.coords).then((r) => {
-            if (!alive) return;
-            setRoute(r);
-            setIdx(0);
-        });
+        mountedRef.current = true;
         return () => {
-            alive = false;
+            mountedRef.current = false;
         };
-    }, [driver.coords, payload.origin.coords]);
-
-    const polyline = useMemo(
-        () => (route?.polyline?.length ? route.polyline : [driver.coords, payload.origin.coords]),
-        [route, driver.coords, payload.origin.coords]
-    );
-    const last = polyline.length - 1;
-
-    // SIMULASI: driver bergerak di sepanjang rute (~45 detik). Hapus bagian ini saat pakai lokasi driver asli.
-    useEffect(() => {
-        if (last < 1) return;
-        const step = Math.max(1, Math.ceil(last / 45));
-        const id = setInterval(() => setIdx((i) => Math.min(i + step, last)), 1000);
-        return () => clearInterval(id);
-    }, [last]);
-
-    // marker berisi View -> perlu tracksViewChanges sebentar supaya gambar ikut ter-render, lalu dimatikan
-    useEffect(() => {
-        const t = setTimeout(() => setTrackView(false), 1200);
-        return () => clearTimeout(t);
     }, []);
 
+    useEffect(() => {
+        const prev = lastFetchRef.current;
+        if (
+            prev &&
+            distanceMeters(prev, driver.coords) < REFETCH_ROUTE_METERS
+        ) {
+            return;
+        }
+
+        lastFetchRef.current = driver.coords;
+        const id = ++reqRef.current;
+
+        getRoute(driver.coords, payload.origin.coords)
+            .then((r) => {
+                if (mountedRef.current && id === reqRef.current) {
+                    setRoute(r);
+                }
+            })
+            .catch((err) =>
+                console.warn('[DriverFound] Gagal ambil rute:', err?.message)
+            );
+    }, [
+        driver.coords.latitude,
+        driver.coords.longitude,
+        payload.origin.coords.latitude,
+        payload.origin.coords.longitude,
+    ]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const polyline = useMemo(
+        () =>
+            route?.polyline?.length
+                ? route.polyline
+                : [driver.coords, payload.origin.coords],
+        [route, driver.coords, payload.origin.coords]
+    );
+
+    // ---- AnimatedRegion untuk marker driver (smooth) ----
+    const driverCoord = useRef(
+        new AnimatedRegion({
+            latitude: driver.coords.latitude,
+            longitude: driver.coords.longitude,
+            latitudeDelta: 0,
+            longitudeDelta: 0,
+        })
+    ).current;
+
+    // ---- Update posisi marker tiap driver.coords berubah (dari polling parent) ----
+    useEffect(() => {
+        driverCoord
+            .timing({
+                latitude: driver.coords.latitude,
+                longitude: driver.coords.longitude,
+                latitudeDelta: 0,
+                longitudeDelta: 0,
+                duration: MARKER_ANIM_MS,
+                useNativeDriver: false,
+            } as any)
+            .start();
+    }, [
+        driver.coords.latitude,
+        driver.coords.longitude,
+        driverCoord,
+    ]);
+
+    // ---- Matikan trackView setelah 500 ms (biar marker ringan) ----
+    useEffect(() => {
+        const t = setTimeout(() => setTrackView(false), 500);
+        return () => clearTimeout(t);
+    }, [driver.vehicleType]);
+
+    // ---- Fit peta: sekali saat rute pertama tiba ----
     const fit = () => {
         mapRef.current?.fitToCoordinates(polyline, {
-            edgePadding: { top: insets.top + 140, bottom: SHEET_H + 60, left: 60, right: 60 },
+            edgePadding: {
+                top: insets.top + 140,
+                bottom: SHEET_H + 60,
+                left: 60,
+                right: 60,
+            },
             animated: true,
         });
     };
     useEffect(() => {
-        fit();
+        if (route && !fittedRef.current) {
+            fittedRef.current = true;
+            fit();
+        }
     }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const driverPos = polyline[Math.min(idx, last)];
-    const arrived = last >= 1 && idx >= last;
+    // ---- Status "sampai" ----
+    // ⚠️ Karena Ojek tidak punya status backend 'arrived', kita pakai jarak.
+    // Kalau nanti backend Ojek punya status 'arrived', ubah ke `driverStatus === 'arrived'`.
+    const distToPickup = distanceMeters(driver.coords, payload.origin.coords);
+    const arrived = distToPickup <= 50; // 50m
 
     useEffect(() => {
         if (arrived && !arrivedFiredRef.current) {
@@ -176,11 +250,17 @@ export default function DriverFoundStep({ payload, driver, onBack, onCancel, onA
             onArrivedRef.current?.();
         }
     }, [arrived]);
-    const totalSec = route?.durationSec ?? 300;
-    const remainSec = Math.round(totalSec * (1 - (last > 0 ? idx / last : 1)));
+
+    // ---- ETA dari route ----
+    const remainSec = route?.durationSec ?? 300;
     const minutes = Math.max(1, Math.ceil(remainSec / 60));
 
-    const call = () => (onCall ? onCall() : Linking.openURL(`tel:${driver.phone}`));
+    const call = () =>
+        onCall ? onCall() : Linking.openURL(`tel:${driver.phone}`);
+
+    const vehicleIcon =
+        VEHICLE_IMG[driver.vehicleType ?? payload.service] ??
+        VEHICLE_IMG.motor;
 
     return (
         <View style={{ flex: 1 }}>
@@ -192,15 +272,29 @@ export default function DriverFoundStep({ payload, driver, onBack, onCancel, onA
                 rotateEnabled={false}
                 onMapReady={fit}
                 initialRegion={{
-                    latitude: payload.origin.coords.latitude,
-                    longitude: payload.origin.coords.longitude,
+                    latitude: driver.coords.latitude,
+                    longitude: driver.coords.longitude,
                     latitudeDelta: 0.03,
                     longitudeDelta: 0.03,
                 }}
             >
-                <Polyline coordinates={polyline.slice(idx)} strokeColor="#ffffff" strokeWidth={9} lineCap="round" lineJoin="round" />
-                <Polyline coordinates={polyline.slice(idx)} strokeColor={colors.primary} strokeWidth={5} lineCap="round" lineJoin="round" />
+                {/* Polyline aktif (driver -> pickup) */}
+                <Polyline
+                    coordinates={polyline}
+                    strokeColor="#ffffff"
+                    strokeWidth={9}
+                    lineCap="round"
+                    lineJoin="round"
+                />
+                <Polyline
+                    coordinates={polyline}
+                    strokeColor={colors.primary}
+                    strokeWidth={5}
+                    lineCap="round"
+                    lineJoin="round"
+                />
 
+                {/* Marker titik jemput */}
                 <Marker
                     coordinate={payload.origin.coords}
                     image={MARKER_ORIGIN}
@@ -209,23 +303,40 @@ export default function DriverFoundStep({ payload, driver, onBack, onCancel, onA
                     description="Titik jemput"
                     zIndex={1}
                 />
-                <Marker coordinate={driverPos} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={trackView} zIndex={2}>
+
+                {/* Marker driver — DINAMIS dari driver.coords */}
+                <MarkerAnimated
+                    coordinate={driverCoord}
+                    anchor={{ x: 0.5, y: 0.5 }}
+                    tracksViewChanges={trackView}
+                    zIndex={2}
+                >
                     <View style={s.driverMarker}>
-                        <Image source={VEHICLE_IMG[payload.service]} style={{ width: 34, height: 34 }} resizeMode="contain" />
+                        <Image
+                            source={vehicleIcon}
+                            style={{ width: 34, height: 34 }}
+                            resizeMode="contain"
+                        />
                     </View>
-                </Marker>
+                </MarkerAnimated>
             </MapView>
 
-            {/* kartu asal-tujuan */}
-            <Animated.View entering={FadeInUp.duration(300)} style={[s.routeCard, { top: insets.top + 12 }]}>
+            <Animated.View
+                entering={FadeInUp.duration(300)}
+                style={[s.routeCard, { top: insets.top + 12 }]}
+            >
                 <View style={s.routeRow}>
                     <RouteDot type="origin" />
-                    <Text style={s.routeText} numberOfLines={1}>{payload.origin.name}</Text>
+                    <Text style={s.routeText} numberOfLines={1}>
+                        {payload.origin.name}
+                    </Text>
                 </View>
                 <View style={s.routeDivider} />
                 <View style={s.routeRow}>
                     <RouteDot type="destination" />
-                    <Text style={s.routeText} numberOfLines={1}>{payload.destination.name}</Text>
+                    <Text style={s.routeText} numberOfLines={1}>
+                        {payload.destination.name}
+                    </Text>
                 </View>
             </Animated.View>
 
@@ -233,43 +344,65 @@ export default function DriverFoundStep({ payload, driver, onBack, onCancel, onA
                 <CircleButton icon="arrow-back" onPress={onBack} />
             </View>
 
-            {/* bottom sheet */}
             <Animated.View
                 entering={FadeInUp.duration(350)}
-                style={[s.sheet, { height: SHEET_H, paddingBottom: insets.bottom + 12 }]}
+                style={[
+                    s.sheet,
+                    { height: SHEET_H, paddingBottom: insets.bottom + 12 },
+                ]}
             >
                 <View style={s.handleArea}>
                     <View style={s.handle} />
                 </View>
 
-                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 4 }}>
-                    {/* status + ETA */}
+                <ScrollView
+                    showsVerticalScrollIndicator={false}
+                    contentContainerStyle={{ paddingBottom: 4 }}
+                >
                     <View style={s.statusRow}>
                         <View style={{ flex: 1 }}>
                             <Text style={s.statusTitle}>
-                                {arrived ? 'Drivermu sudah sampai' : 'Driver menuju lokasi jemputmu'}
+                                {arrived
+                                    ? 'Drivermu sudah sampai'
+                                    : 'Driver menuju lokasi jemputmu'}
                             </Text>
                             <Text style={s.statusSub}>
-                                {arrived ? 'Segera temui drivermu di titik jemput' : 'Pantau posisinya di peta'}
+                                {arrived
+                                    ? 'Segera temui drivermu di titik jemput'
+                                    : 'Pantau posisinya di peta'}
                             </Text>
                         </View>
                         <View style={s.etaBox}>
-                            <Text style={s.etaNum}>{arrived ? '0' : minutes}</Text>
+                            <Text style={s.etaNum}>
+                                {arrived ? '0' : minutes}
+                            </Text>
                             <Text style={s.etaUnit}>mnt</Text>
                         </View>
                     </View>
 
-                    {/* data driver */}
                     <View style={s.driverCard}>
                         <View style={s.driverTop}>
                             <Avatar name={driver.name} uri={driver.photo} />
                             <View style={{ flex: 1 }}>
-                                <Text style={s.driverName} numberOfLines={1}>{driver.name}</Text>
+                                <Text style={s.driverName} numberOfLines={1}>
+                                    {driver.name}
+                                </Text>
                                 <View style={s.ratingRow}>
-                                    <Ionicons name="star" size={14} color="#f5a623" />
-                                    <Text style={s.ratingText}>{driver.rating.toFixed(1)}</Text>
+                                    <Ionicons
+                                        name="star"
+                                        size={14}
+                                        color="#f5a623"
+                                    />
+                                    <Text style={s.ratingText}>
+                                        {driver.rating.toFixed(1)}
+                                    </Text>
                                     <View style={s.dot} />
-                                    <Text style={s.tripsText} numberOfLines={1}>{rupiahDots(driver.trips)} perjalanan</Text>
+                                    <Text
+                                        style={s.tripsText}
+                                        numberOfLines={1}
+                                    >
+                                        {rupiahDots(driver.trips)} perjalanan
+                                    </Text>
                                 </View>
                             </View>
                         </View>
@@ -278,36 +411,60 @@ export default function DriverFoundStep({ payload, driver, onBack, onCancel, onA
 
                         <View style={s.vehicleRow}>
                             <View style={{ flex: 1 }}>
-                                <Text style={s.vehicleName} numberOfLines={1}>{driver.vehicle}</Text>
-                                <Text style={s.vehicleColor} numberOfLines={1}>{driver.color}</Text>
+                                <Text
+                                    style={s.vehicleName}
+                                    numberOfLines={1}
+                                >
+                                    {driver.vehicle}
+                                </Text>
+                                <Text
+                                    style={s.vehicleColor}
+                                    numberOfLines={1}
+                                >
+                                    {driver.color}
+                                </Text>
                             </View>
                             <View style={s.plate}>
-                                <Text style={s.plateText}>{driver.plate}</Text>
+                                <Text style={s.plateText}>
+                                    {driver.plate}
+                                </Text>
                             </View>
                         </View>
                     </View>
 
-                    {/* chat + telepon */}
                     <View style={s.actionRow}>
                         <Pressable onPress={onChat} style={s.chatPill}>
-                            <Ionicons name="chatbubble-ellipses-outline" size={20} color={colors.textMuted} />
-                            <Text style={s.chatText}>Kirim pesan ke driver</Text>
+                            <Ionicons
+                                name="chatbubble-ellipses-outline"
+                                size={20}
+                                color={colors.textMuted}
+                            />
+                            <Text style={s.chatText}>
+                                Kirim pesan ke driver
+                            </Text>
                         </Pressable>
                         <Pressable onPress={call} style={s.callBtn}>
                             <Ionicons name="call" size={22} color="#fff" />
                         </Pressable>
                     </View>
 
-                    {/* ringkasan tarif */}
                     <View style={s.fareRow}>
                         <View style={{ flex: 1 }}>
-                            <Text style={s.fareLabel}>{payload.optionName}</Text>
+                            <Text style={s.fareLabel}>
+                                {payload.optionName}
+                            </Text>
                             <View style={s.payRow}>
-                                <Ionicons name="wallet" size={13} color={colors.primary} />
+                                <Ionicons
+                                    name="wallet"
+                                    size={13}
+                                    color={colors.primary}
+                                />
                                 <Text style={s.payText}>Tunai</Text>
                             </View>
                         </View>
-                        <Text style={s.farePrice}>{formatRupiah(payload.price)}</Text>
+                        <Text style={s.farePrice}>
+                            {formatRupiah(payload.price)}
+                        </Text>
                     </View>
 
                     <Pressable onPress={onCancel} style={s.cancelBtn}>
@@ -323,12 +480,8 @@ const s = StyleSheet.create({
     driverMarker: {
         width: 46,
         height: 46,
-        borderRadius: 23,
-        backgroundColor: '#fff',
         alignItems: 'center',
         justifyContent: 'center',
-        borderWidth: 2,
-        borderColor: colors.primary,
     },
 
     routeCard: {
@@ -345,11 +498,36 @@ const s = StyleSheet.create({
         shadowRadius: 8,
         shadowOffset: { width: 0, height: 3 },
     },
-    routeRow: { flexDirection: 'row', alignItems: 'center', gap: 12, height: 36 },
-    routeText: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.text },
-    routeDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginLeft: 36 },
-    routeDot: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-    routeDotInner: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#fff' },
+    routeRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        height: 36,
+    },
+    routeText: {
+        flex: 1,
+        fontSize: 15,
+        fontWeight: '600',
+        color: colors.text,
+    },
+    routeDivider: {
+        height: StyleSheet.hairlineWidth,
+        backgroundColor: colors.border,
+        marginLeft: 36,
+    },
+    routeDot: {
+        width: 24,
+        height: 24,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    routeDotInner: {
+        width: 9,
+        height: 9,
+        borderRadius: 5,
+        backgroundColor: '#fff',
+    },
 
     floatBack: { position: 'absolute', left: 16 },
 
@@ -367,10 +545,24 @@ const s = StyleSheet.create({
         shadowOpacity: 0.12,
         shadowRadius: 10,
     },
-    handleArea: { alignItems: 'center', paddingTop: 10, paddingBottom: 12 },
-    handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: '#c9ccd1' },
+    handleArea: {
+        alignItems: 'center',
+        paddingTop: 10,
+        paddingBottom: 12,
+    },
+    handle: {
+        width: 40,
+        height: 4,
+        borderRadius: 2,
+        backgroundColor: '#c9ccd1',
+    },
 
-    statusRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 14 },
+    statusRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        marginBottom: 14,
+    },
     statusTitle: { fontSize: 17, fontWeight: '800', color: colors.text },
     statusSub: { fontSize: 13, color: colors.textMuted, marginTop: 2 },
     etaBox: {
@@ -381,7 +573,12 @@ const s = StyleSheet.create({
         backgroundColor: colors.primarySoft,
         alignItems: 'center',
     },
-    etaNum: { fontSize: 22, fontWeight: '800', color: colors.primary, lineHeight: 26 },
+    etaNum: {
+        fontSize: 22,
+        fontWeight: '800',
+        color: colors.primary,
+        lineHeight: 26,
+    },
     etaUnit: { fontSize: 12, fontWeight: '700', color: colors.primary },
 
     driverCard: {
@@ -396,13 +593,33 @@ const s = StyleSheet.create({
         backgroundColor: '#d9dce1',
         marginVertical: 12,
     },
-    avatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#dfe3e8' },
-    avatarFallback: { alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primary },
+    avatar: {
+        width: 56,
+        height: 56,
+        borderRadius: 28,
+        backgroundColor: '#dfe3e8',
+    },
+    avatarFallback: {
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: colors.primary,
+    },
     avatarText: { color: '#fff', fontSize: 20, fontWeight: '800' },
     driverName: { fontSize: 16, fontWeight: '800', color: colors.text },
-    ratingRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 },
+    ratingRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        marginTop: 4,
+    },
     ratingText: { fontSize: 13, fontWeight: '700', color: colors.text },
-    dot: { width: 3, height: 3, borderRadius: 2, backgroundColor: '#c4c8cf', marginHorizontal: 2 },
+    dot: {
+        width: 3,
+        height: 3,
+        borderRadius: 2,
+        backgroundColor: '#c4c8cf',
+        marginHorizontal: 2,
+    },
     tripsText: { flexShrink: 1, fontSize: 12, color: colors.textMuted },
     vehicleRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
     vehicleName: { fontSize: 14, fontWeight: '700', color: colors.text },
@@ -415,9 +632,19 @@ const s = StyleSheet.create({
         borderColor: colors.text,
         backgroundColor: '#fff',
     },
-    plateText: { fontSize: 15, fontWeight: '800', color: colors.text, letterSpacing: 0.5 },
+    plateText: {
+        fontSize: 15,
+        fontWeight: '800',
+        color: colors.text,
+        letterSpacing: 0.5,
+    },
 
-    actionRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
+    actionRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        marginBottom: 12,
+    },
     chatPill: {
         flex: 1,
         height: 48,
@@ -453,5 +680,5 @@ const s = StyleSheet.create({
     farePrice: { fontSize: 17, fontWeight: '800', color: colors.text },
 
     cancelBtn: { alignItems: 'center', paddingVertical: 14 },
-    cancelText: { fontSize: 15, fontWeight: '700', color: CORAL },
+    cancelText: { fontSize: 15, fontWeight: '700', color: '#ee6c6c' },
 });

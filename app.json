@@ -4,7 +4,7 @@
     "slug": "waruung",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/app-icon.png",
     "scheme": "waruung",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -17,25 +17,30 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.waruung.app",
       "config": {
-        "googleMapsApiKey": "AIzaSyCxfdljVSgNFeQKfEzNzeUJUuJVxSxntVQ"
+        "googleMapsApiKey": "AIzaSyCQOfitYRU7iAHMRaj0dwcrI8-UQIiFPWI"
       }
     },
     "android": {
       "package": "com.waruung.app",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#40a3ea"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "config": {
         "googleMaps": {
-          "apiKey": "AIzaSyCxfdljVSgNFeQKfEzNzeUJUuJVxSxntVQ"
+          "apiKey": "AIzaSyCQOfitYRU7iAHMRaj0dwcrI8-UQIiFPWI"
         }
       },
       "permissions": [
         "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION"
+        "ACCESS_COARSE_LOCATION",
+        "POST_NOTIFICATIONS",
+        "VIBRATE",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ]
     },
     "web": {
@@ -52,10 +57,28 @@
           "locationWhenInUsePermission": "Waruung memerlukan akses lokasi untuk menentukan titik jemput dan menampilkan posisi kamu di peta.",
           "locationAlwaysAndWhenInUsePermission": "Waruung memerlukan akses lokasi untuk mencari driver terdekat dan menampilkan posisi kamu di peta."
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/app-icon.png",
+          "color": "#40a3ea",
+          "defaultChannel": "default",
+          "sounds": [
+            "./assets/sounds/notification.mp3"
+          ]
+        }
       ]
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "888d8310-6b3f-470a-9057-5baa748aca11"
+      }
+    },
+    "owner": "amirku"
   }
 }
