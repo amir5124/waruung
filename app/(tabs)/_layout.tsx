@@ -6,15 +6,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
   index: 'home',
-  favorit: 'heart-outline',
-  pesanan: 'document-text-outline',
+  order: 'document-text-outline',
+  chat: 'chatbubble-ellipses-outline',
   menu: 'person-outline', // 🔧 dulunya 'menu-outline' -> icon profile/account
 };
 
 const LABELS: Record<string, string> = {
   index: 'Home',
-  favorit: 'Favorit',
-  pesanan: 'Pesanan',
+  order: 'Order',
+  chat: 'Chat',
   menu: 'Akun', // 🔧 dulunya 'Menu' -> label disesuaikan jadi Akun (opsional, sesuaikan selera)
 };
 
@@ -74,8 +74,8 @@ export default function TabLayout() {
       screenOptions={{ headerShown: false }}
     >
       <Tabs.Screen name="index" options={{ title: 'Home' }} />
-      <Tabs.Screen name="favorit" options={{ title: 'Favorit' }} />
-      <Tabs.Screen name="pesanan" options={{ title: 'Pesanan' }} />
+      <Tabs.Screen name="order" options={{ title: 'Order' }} />
+      <Tabs.Screen name="chat" options={{ title: 'Chat' }} />
       <Tabs.Screen name="menu" options={{ title: 'Akun' }} />
     </Tabs>
   );

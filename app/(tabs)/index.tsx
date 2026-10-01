@@ -1,8 +1,21 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import * as Location from 'expo-location';
+import { router } from 'expo-router';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+
+import AppAlert from '../../components/AppAlert';
 import BannerCarousel from '../../components/BannerCarousel';
 import GradientBackground from '../../components/GradientBackground';
+import LoadingModal from '../../components/LoadingModal';
 import PromoCard from '../../components/PromoCard';
 import ServiceMenuItem from '../../components/ServiceMenuItem';
 
@@ -36,21 +49,129 @@ const PROMOS = [
   },
 ];
 
+const DEFAULT_LOCATION = 'Jl Soekarno Hatta Malang, Jawa...';
+
 export default function HomeScreen() {
+  const [locationText, setLocationText] = useState('Mengambil lokasi...');
+  const [loadingLocation, setLoadingLocation] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const [alertVisible, setAlertVisible] = useState(false);
+  const [alertTitle, setAlertTitle] = useState('');
+  const [alertMessage, setAlertMessage] = useState('');
+
+  /* ============ AMBIL LOKASI SAAT INI ============ */
+  const fetchLocation = useCallback(async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+
+      if (status !== 'granted') {
+        setLocationText(DEFAULT_LOCATION);
+        return;
+      }
+
+      const position = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const { latitude, longitude } = position.coords;
+
+      const geocode = await Location.reverseGeocodeAsync({
+        latitude,
+        longitude,
+      });
+
+      if (geocode && geocode.length > 0) {
+        const addr = geocode[0];
+        const parts = [
+          addr.street || addr.name,
+          addr.district || addr.subregion,
+          addr.city || addr.region,
+        ].filter(Boolean);
+
+        const formatted = parts.join(', ');
+        setLocationText(formatted.length > 0 ? formatted : DEFAULT_LOCATION);
+      } else {
+        setLocationText(DEFAULT_LOCATION);
+      }
+    } catch (err) {
+      console.log('Gagal mengambil lokasi:', err);
+      setLocationText(DEFAULT_LOCATION);
+    }
+  }, []);
+
+  /* ============ LOAD PERTAMA KALI ============ */
+  useEffect(() => {
+    let isMounted = true;
+
+    (async () => {
+      if (isMounted) await fetchLocation();
+      if (isMounted) setLoadingLocation(false);
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [fetchLocation]);
+
+  /* ============ PULL TO REFRESH ============ */
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      // Refresh lokasi + (kalau ada) data lain seperti promo/banner.
+      await fetchLocation();
+
+      // Kalau nanti ada fetch data lain (API), tambahkan di sini.
+      // await fetchPromos();
+      // await fetchBanners();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchLocation]);
+
+  /* ============ HANDLER KLIK MENU ============ */
+  const handleServicePress = (service: (typeof SERVICES)[number]) => {
+    if (service.label === 'WarFood') {
+      setAlertTitle('Segera Hadir');
+      setAlertMessage(
+        'Fitur WarFood sedang dalam tahap pengembangan. Mohon ditunggu ya! 🚧'
+      );
+      setAlertVisible(true);
+      return;
+    }
+
+    router.push(service.route as any);
+  };
+
   return (
     <View style={styles.container}>
       <GradientBackground />
+
       <SafeAreaView style={styles.container} edges={['top']}>
-        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              colors={['#2F86EB']}
+              tintColor="#2F86EB"
+              title="Memperbarui..."
+              titleColor="#2F86EB"
+            />
+          }
+        >
           {/* Header */}
           <View style={styles.headerRow}>
             <Pressable style={styles.locationPill}>
               <Ionicons name="location-outline" size={22} color="#1B1B1B" />
               <Text style={styles.locationText} numberOfLines={1}>
-                Jl Soekarno Hatta Malang, Jawa...
+                {locationText}
               </Text>
               <Ionicons name="chevron-down" size={20} color="#1B1B1B" />
             </Pressable>
+
             <Pressable style={styles.bellButton}>
               <Ionicons name="notifications-outline" size={24} color="#1B1B1B" />
               <View style={styles.dot} />
@@ -63,7 +184,11 @@ export default function HomeScreen() {
           {/* Layanan */}
           <View style={styles.serviceRow}>
             {SERVICES.map((service) => (
-              <ServiceMenuItem key={service.label} {...service} />
+              <ServiceMenuItem
+                key={service.label}
+                {...service}
+                onPress={() => handleServicePress(service)}
+              />
             ))}
           </View>
 
@@ -90,6 +215,16 @@ export default function HomeScreen() {
           </ScrollView>
         </ScrollView>
       </SafeAreaView>
+
+      <LoadingModal visible={loadingLocation} />
+
+      {/* ============ ALERT ============ */}
+      <AppAlert
+        visible={alertVisible}
+        title={alertTitle}
+        message={alertMessage}
+        onClose={() => setAlertVisible(false)}
+      />
     </View>
   );
 }

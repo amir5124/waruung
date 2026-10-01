@@ -1,17 +1,38 @@
 import { router } from 'expo-router';
-import { Image, ImageSourcePropType, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+    Image,
+    ImageSourcePropType,
+    Pressable,
+    StyleSheet,
+    Text,
+    View,
+} from 'react-native';
 
 type Props = {
     label: string;
     icon: ImageSourcePropType;
-    route: string;
+    route?: string;
+    onPress?: () => void;
 };
 
-export default function ServiceMenuItem({ label, icon, route }: Props) {
+export default function ServiceMenuItem({ label, icon, route, onPress }: Props) {
+    const handlePress = () => {
+        // Prioritas: kalau parent kirim onPress, pakai itu.
+        if (onPress) {
+            onPress();
+            return;
+        }
+
+        // Fallback: navigasi pakai route kalau ada.
+        if (route) {
+            router.push(route as any);
+        }
+    };
+
     return (
         <Pressable
             style={styles.card}
-            onPress={() => router.push(route as any)}
+            onPress={handlePress}
             android_ripple={{ color: '#E5EEFB' }}
         >
             <View style={styles.iconWrap}>
