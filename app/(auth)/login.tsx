@@ -137,7 +137,7 @@ export default function LoginScreen() {
             <StatusBar barStyle="dark-content" backgroundColor={COLORS.bg} />
             <KeyboardAvoidingView
                 style={{ flex: 1 }}
-                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             >
                 <ScrollView
                     contentContainerStyle={styles.scrollContent}

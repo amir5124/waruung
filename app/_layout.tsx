@@ -1,7 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 import { Stack, router, usePathname } from 'expo-router';
-import { createContext, useContext, useEffect, useRef, useState } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import {
   OrderProvider,
@@ -22,9 +28,11 @@ const OnboardingContext = createContext<OnboardingContextType>({
 
 export const useOnboarding = () => useContext(OnboardingContext);
 
-// ============ Helper: tentukan route service ============
+// ============================================================
+// Helper: tentukan route service dari order
+// ============================================================
 
-/** order.type: 'send' -> kurir, 'food' -> warfood, 'ride' -> null (lihat tariff_code) */
+/** order.type: 'send' → kurir, 'food' → warfood, 'ride' → lihat tariff */
 const routeFromType = (type?: string): ServiceRoute | null => {
   switch (type) {
     case 'send':
@@ -38,7 +46,8 @@ const routeFromType = (type?: string): ServiceRoute | null => {
 
 const routeFromTariff = (code?: string | null): ServiceRoute | null => {
   const c = (code ?? '').toLowerCase();
-  if (c.startsWith('warsend') || c.includes('send')) return '/services/kurir';
+  if (c.startsWith('warsend') || c.includes('send'))
+    return '/services/kurir';
   if (c.startsWith('warfood')) return '/services/warfood';
   if (c.startsWith('warcar')) return '/services/ojek-mobil';
   if (c.startsWith('warjek')) return '/services/ojek-motor';
@@ -46,8 +55,8 @@ const routeFromTariff = (code?: string | null): ServiceRoute | null => {
 };
 
 /**
- * Urutan: tipe dari data notif -> tariff_code dari data notif
- * -> ambil order dari API -> default ojek motor.
+ * Urutan: tipe dari data notif → tariff_code dari data notif
+ * → ambil order dari API → default ojek motor.
  */
 const resolveService = async (
   data: any,
@@ -71,7 +80,9 @@ const resolveService = async (
   }
 };
 
-// ============ Handler Tap Notifikasi ============
+// ============================================================
+// Handler Tap Notifikasi
+// ============================================================
 function NotificationHandler() {
   const { setActiveOrder, setActiveRoomId } = useOrder();
   const handledRef = useRef<string | null>(null);
@@ -82,19 +93,22 @@ function NotificationHandler() {
 
   useEffect(() => {
     const responseListener =
-      Notifications.addNotificationResponseReceivedListener((response) => {
-        const data = response.notification.request.content.data as any;
-        console.log('[notif] User tap (background):', data);
-        handleTapOnce(data);
-      });
+      Notifications.addNotificationResponseReceivedListener(
+        (response) => {
+          const data = response.notification.request.content
+            .data as any;
+          console.log('[notif] User tap (background):', data);
+          handleTapOnce(data);
+        }
+      );
 
     if (!coldStartHandledRef.current) {
       coldStartHandledRef.current = true;
       Notifications.getLastNotificationResponseAsync().then(
         (response) => {
           if (response) {
-            const data = response.notification.request.content
-              .data as any;
+            const data = response.notification.request
+              .content.data as any;
             console.log('[notif] Cold start tap:', data);
             handleTapOnce(data);
           }
@@ -112,7 +126,8 @@ function NotificationHandler() {
    */
   const handleTapOnce = (data: any) => {
     if (!data) return;
-    const key = `${data.type}-${data.order_id ?? data.room_id ?? 'none'}`;
+    const key = `${data.type}-${data.order_id ?? data.room_id ?? 'none'
+      }`;
 
     if (handledRef.current === key) {
       console.log('[notif] Skip — sudah ditangani:', key);
@@ -121,7 +136,8 @@ function NotificationHandler() {
     handledRef.current = key;
 
     setTimeout(() => {
-      if (handledRef.current === key) handledRef.current = null;
+      if (handledRef.current === key)
+        handledRef.current = null;
     }, 8000);
 
     handleTap(data);
@@ -140,13 +156,15 @@ function NotificationHandler() {
     // ===== Chat =====
     if (data.type === 'chat_message' && data.room_id) {
       const target = `/chat/${data.room_id}`;
-
       setActiveRoomId(Number(data.room_id));
 
       setTimeout(() => {
-        // Guard 2: cek route saat ini sebelum push
         if (pathnameRef.current === target) {
-          console.log('[notif] Sudah di', target, '— skip push');
+          console.log(
+            '[notif] Sudah di',
+            target,
+            '— skip push'
+          );
           return;
         }
         router.push(target as any);
@@ -162,8 +180,12 @@ function NotificationHandler() {
       if (data.type === 'new_order') {
         setActiveOrder(orderId, null);
         setTimeout(() => {
-          if (pathnameRef.current.startsWith('/(tabs)')) {
-            console.log('[notif] Sudah di (tabs) — skip push');
+          if (
+            pathnameRef.current.startsWith('/(tabs)')
+          ) {
+            console.log(
+              '[notif] Sudah di (tabs) — skip push'
+            );
             return;
           }
           router.push('/(tabs)' as any);
@@ -173,12 +195,16 @@ function NotificationHandler() {
 
       // Tentukan route service (async, fallback ke API)
       resolveService(data, orderId).then((target) => {
-        console.log('[notif] redirect ke:', target, 'orderId:', orderId);
+        console.log(
+          '[notif] redirect ke:',
+          target,
+          'orderId:',
+          orderId
+        );
 
         setActiveOrder(orderId, target);
 
         setTimeout(() => {
-          // Guard 2: jangan push kalau sudah di route target
           if (pathnameRef.current === target) {
             console.log(
               '[notif] Sudah di route target',
@@ -196,7 +222,9 @@ function NotificationHandler() {
   return null;
 }
 
-// ============ Root Layout ============
+// ============================================================
+// Root Layout
+// ============================================================
 export default function RootLayout() {
   const [isLoading, setIsLoading] = useState(true);
   const [hasSeenOnboarding, setHasSeenOnboarding] = useState(false);
@@ -211,7 +239,10 @@ export default function RootLayout() {
         }
       })
       .catch((error) => {
-        console.error('Gagal cek status onboarding:', error);
+        console.error(
+          'Gagal cek status onboarding:',
+          error
+        );
       })
       .finally(() => {
         if (isMounted) {
@@ -228,7 +259,10 @@ export default function RootLayout() {
     try {
       await AsyncStorage.setItem(ONBOARDING_KEY, 'true');
     } catch (error) {
-      console.error('Gagal menyimpan status onboarding:', error);
+      console.error(
+        'Gagal menyimpan status onboarding:',
+        error
+      );
     } finally {
       setHasSeenOnboarding(true);
     }
@@ -251,18 +285,26 @@ export default function RootLayout() {
 
   return (
     <OrderProvider>
-      <OnboardingContext.Provider value={{ markOnboardingComplete }}>
+      <OnboardingContext.Provider
+        value={{ markOnboardingComplete }}
+      >
         <NotificationHandler />
         <Stack screenOptions={{ headerShown: false }}>
+          {/* Onboarding — hanya muncul kalau belum pernah lihat */}
           <Stack.Protected guard={!hasSeenOnboarding}>
             <Stack.Screen name="onboarding" />
           </Stack.Protected>
 
+          {/* Main app — hanya muncul kalau sudah onboarding */}
           <Stack.Protected guard={hasSeenOnboarding}>
             <Stack.Screen name="(auth)" />
             <Stack.Screen name="(tabs)" />
             <Stack.Screen name="services" />
             <Stack.Screen name="chat/[roomId]" />
+
+            {/* ⬇️ TAMBAH: halaman saved addresses */}
+            <Stack.Screen name="saved-addresses" />
+            <Stack.Screen name="save-address/[kind]" />
           </Stack.Protected>
         </Stack>
       </OnboardingContext.Provider>

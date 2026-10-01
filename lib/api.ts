@@ -2,12 +2,15 @@ import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
 const DEV_HOST = Platform.OS === 'android' ? '10.0.2.2' : 'localhost';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? `http://${DEV_HOST}:3000`;
+const BASE_URL =
+    process.env.EXPO_PUBLIC_API_URL ?? `http://${DEV_HOST}:3000`;
+
 console.log('[api] ========== ENV CHECK ==========');
 console.log('[api] EXPO_PUBLIC_API_URL:', process.env.EXPO_PUBLIC_API_URL);
 console.log('[api] BASE_URL:', BASE_URL);
 console.log('[api] Platform.OS:', Platform.OS);
 console.log('[api] ================================');
+
 const TOKEN_KEY = 'auth_token';
 
 // ---------- Token helpers ----------
@@ -115,11 +118,8 @@ export interface CreateOrderPayload {
     receiver_phone?: string;
     sender_name?: string;
     sender_phone?: string;
-
     sender_landmark?: string;
     receiver_landmark?: string;
-
-    // ⬇️ Field paket WarSend
     package_type?: string;
     package_size?: 'kecil' | 'sedang' | 'besar';
     package_weight?: string;
@@ -189,13 +189,10 @@ export interface OrderResponse {
     sender_landmark?: string;
     receiver_landmark?: string;
 
-    // ⬇️ Field paket WarSend
     package_type?: string | null;
     package_size?: string | null;
     package_weight?: string | null;
     package_protection?: string | null;
-
-    // ⬇️ Field contact
 
     sender_name?: string | null;
     receiver_name?: string | null;
@@ -266,7 +263,9 @@ export interface NearbyDriver {
     coords: { latitude: number; longitude: number } | null;
 }
 
-// ---------- Core request ----------
+// ============================================================
+// Core request (JSON)
+// ============================================================
 async function request<T>(
     path: string,
     options: { method?: string; body?: any; auth?: boolean } = {}
@@ -300,7 +299,46 @@ async function request<T>(
     return json.data as T;
 }
 
-// ---------- API ----------
+// ============================================================
+// Upload file (multipart/form-data) — dipakai avatar & chat image
+// ============================================================
+async function uploadFile<T>(
+    path: string,
+    fieldName: string,
+    file: { uri: string; name: string; type: string }
+): Promise<T> {
+    const token = await getToken();
+    const formData = new FormData();
+
+    // React Native: formData.append dengan object {uri, name, type}
+    formData.append(fieldName, file as any);
+
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    // ⚠️ JANGAN set Content-Type manual — fetch auto-set multipart boundary
+
+    const res = await fetch(`${BASE_URL}${path}`, {
+        method: 'POST',
+        headers,
+        body: formData,
+    });
+
+    let json: any = null;
+    try {
+        json = await res.json();
+    } catch {
+        throw new Error(`Server error (${res.status})`);
+    }
+
+    if (!res.ok || !json?.success) {
+        throw new Error(json?.message || `Upload gagal (${res.status})`);
+    }
+    return json.data as T;
+}
+
+// ============================================================
+// API
+// ============================================================
 export const api = {
     // ===== Auth =====
     register: (input: {
@@ -336,6 +374,27 @@ export const api = {
             auth: true,
         }),
 
+    /**
+     * Upload foto profil ke backend.
+     * Backend akan upload ke Supabase Storage + update profiles.avatar_url.
+     *
+     * @param uri - local URI dari ImagePicker
+     * @param mimeType - 'image/jpeg' | 'image/png' | 'image/webp'
+     * @returns { avatar_url: string }
+     */
+    uploadAvatar: (uri: string, mimeType = 'image/jpeg') => {
+        const fileName = uri.split('/').pop() ?? 'avatar.jpg';
+        return uploadFile<{ avatar_url: string }>(
+            '/api/profiles/avatar',
+            'image',
+            {
+                uri,
+                name: fileName,
+                type: mimeType,
+            }
+        );
+    },
+
     getProfileById: (userId: string) =>
         request<ProfileResponse>(`/api/profiles/${userId}`, { auth: true }),
 
@@ -362,13 +421,6 @@ export const api = {
             auth: true,
         }),
 
-    /**
-     * Update status order.
-     * @param orderId - id order
-     * @param status - status baru
-     * @param reason - alasan (untuk cancelled)
-     * @param sendCode - kode terima paket (untuk completed order 'send')
-     */
     updateOrderStatus: (
         orderId: number,
         status:
@@ -421,48 +473,19 @@ export const api = {
                 auth: true,
             }),
 
-        sendImage: async (
+        sendImage: (
             roomId: number,
             uri: string,
             fileName?: string,
             mimeType?: string
-        ): Promise<ChatMessage> => {
-            const token = await getToken();
-            const formData = new FormData();
-
+        ) => {
             const name = fileName ?? uri.split('/').pop() ?? 'photo.jpg';
             const type = mimeType ?? guessMimeType(name);
-
-            formData.append('image', {
-                uri,
-                name,
-                type,
-            } as any);
-
-            const res = await fetch(
-                `${BASE_URL}/api/chats/rooms/${roomId}/images`,
-                {
-                    method: 'POST',
-                    headers: {
-                        ...(token
-                            ? { Authorization: `Bearer ${token}` }
-                            : {}),
-                    },
-                    body: formData,
-                }
+            return uploadFile<ChatMessage>(
+                `/api/chats/rooms/${roomId}/images`,
+                'image',
+                { uri, name, type }
             );
-
-            let json: any = null;
-            try {
-                json = await res.json();
-            } catch {
-                throw new Error(`Server error (${res.status})`);
-            }
-
-            if (!res.ok || !json?.success) {
-                throw new Error(json?.message || 'Gagal upload gambar');
-            }
-            return json.data as ChatMessage;
         },
 
         markRead: (roomId: number) =>

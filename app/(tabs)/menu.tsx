@@ -1,10 +1,11 @@
+import AppAlert from '@/components/AppAlert';
+import LoadingModal from '@/components/LoadingModal';
 import { api } from '@/lib/api';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import {
-    Alert,
     Image,
     Pressable,
     ScrollView,
@@ -25,26 +26,66 @@ type MenuItem = {
     icon: React.ReactNode;
     label: string;
     subtitle?: string;
+    /** Kalau true, tampil alert "Dalam Pengembangan" */
+    comingSoon?: boolean;
+    /** Rute navigasi — dipakai kalau comingSoon != true */
+    route?: string;
+    /** Custom handler — dipakai kalau butuh aksi selain navigasi */
     onPress?: () => void;
+};
+
+type AlertButton = {
+    text: string;
+    onPress?: () => void;
+    style?: 'default' | 'cancel' | 'destructive';
 };
 
 export default function MenuScreen() {
     const router = useRouter();
     const [profile, setProfile] = useState<Profile | null>(null);
+    const [loadingProfile, setLoadingProfile] = useState(false);
 
-    // Muat profil setiap kali layar ini difokuskan (mis. setelah edit profile)
+    // AppAlert state
+    const [alertState, setAlertState] = useState<{
+        visible: boolean;
+        title: string;
+        message: string;
+        buttons?: AlertButton[];
+    }>({
+        visible: false,
+        title: '',
+        message: '',
+        buttons: undefined,
+    });
+
+    const showAlert = (
+        title: string,
+        message: string,
+        buttons?: AlertButton[]
+    ) => {
+        setAlertState({ visible: true, title, message, buttons });
+    };
+
+    const hideAlert = () => {
+        setAlertState((a) => ({ ...a, visible: false }));
+    };
+
+    // ============================================================
+    // Load profil
+    // ============================================================
     useFocusEffect(
         useCallback(() => {
             (async () => {
-                // 1. Tampilkan cache dulu supaya cepat (opsional)
                 const raw = await AsyncStorage.getItem('profile');
                 if (raw) setProfile(JSON.parse(raw));
 
-                // 2. Ambil data terbaru dari backend
                 try {
                     const fresh = await api.me();
                     setProfile(fresh);
-                    await AsyncStorage.setItem('profile', JSON.stringify(fresh));
+                    await AsyncStorage.setItem(
+                        'profile',
+                        JSON.stringify(fresh)
+                    );
                 } catch (err) {
                     console.warn('Gagal refresh:', err);
                 }
@@ -52,50 +93,140 @@ export default function MenuScreen() {
         }, [])
     );
 
+    // ============================================================
+    // Handlers
+    // ============================================================
     const handleLogout = () => {
-        Alert.alert('Keluar', 'Yakin mau keluar dari akun?', [
+        showAlert('Keluar', 'Yakin mau keluar dari akun?', [
             { text: 'Batal', style: 'cancel' },
             {
                 text: 'Keluar',
                 style: 'destructive',
                 onPress: async () => {
-                    await AsyncStorage.multiRemove(['auth_token', 'profile']);
-                    router.replace('/login');
+                    await AsyncStorage.multiRemove([
+                        'auth_token',
+                        'profile',
+                    ]);
+                    router.replace('/(auth)/login' as any);
                 },
             },
         ]);
     };
 
+    const handleMenuItem = (item: MenuItem) => {
+        // Menu yang masih dalam pengembangan
+        if (item.comingSoon) {
+            showAlert(
+                'Dalam Pengembangan',
+                `Fitur "${item.label}" sedang dalam pengembangan. Pantau terus update dari kami ya! 🚀`,
+                [{ text: 'Oke, ngerti' }]
+            );
+            return;
+        }
+
+        // Menu dengan custom handler
+        if (item.onPress) {
+            item.onPress();
+            return;
+        }
+
+        // Menu dengan route
+        if (item.route) {
+            router.push(item.route as any);
+            return;
+        }
+    };
+
+    // ============================================================
+    // Menu Akun
+    // ============================================================
     const accountItems: MenuItem[] = [
         {
-            icon: <Ionicons name="person-outline" size={22} color="#1AAD5B" />,
+            icon: (
+                <Ionicons
+                    name="person-outline"
+                    size={22}
+                    color="#40a3ea"
+                />
+            ),
             label: 'Data Diri',
             subtitle: 'Nama, nomor HP, email',
-            onPress: () => router.push('/edit-profile' as any),
+            route: '/edit-profile',
         },
         {
-            icon: <Ionicons name="shield-checkmark-outline" size={22} color="#1AAD5B" />,
-            label: 'Keamanan Akun',
-            subtitle: 'PIN, kata sandi, verifikasi',
-        },
-        {
-            icon: <Ionicons name="wallet-outline" size={22} color="#1AAD5B" />,
-            label: 'Metode Pembayaran',
-        },
-        {
-            icon: <MaterialCommunityIcons name="map-marker-outline" size={22} color="#1AAD5B" />,
+            icon: (
+                <MaterialCommunityIcons
+                    name="map-marker-outline"
+                    size={22}
+                    color="#40a3ea"
+                />
+            ),
             label: 'Alamat Tersimpan',
+            subtitle: 'Rumah, kantor, dll',
+            route: '/saved-addresses',
         },
     ];
 
+    // ============================================================
+    // Menu Lainnya
+    // ============================================================
     const otherItems: MenuItem[] = [
-        { icon: <Ionicons name="notifications-outline" size={22} color="#555" />, label: 'Notifikasi' },
-        { icon: <Ionicons name="language-outline" size={22} color="#555" />, label: 'Bahasa', subtitle: 'Indonesia' },
-        { icon: <Ionicons name="help-circle-outline" size={22} color="#555" />, label: 'Pusat Bantuan' },
-        { icon: <Ionicons name="document-text-outline" size={22} color="#555" />, label: 'Syarat & Ketentuan' },
-        { icon: <Ionicons name="information-circle-outline" size={22} color="#555" />, label: 'Tentang Aplikasi' },
+        {
+            icon: (
+                <Ionicons
+                    name="document-text-outline"
+                    size={22}
+                    color="#555"
+                />
+            ),
+            label: 'Syarat & Ketentuan',
+            comingSoon: true,
+        },
+        {
+            icon: (
+                <Ionicons
+                    name="shield-outline"
+                    size={22}
+                    color="#555"
+                />
+            ),
+            label: 'Kebijakan Privasi',
+            comingSoon: true,
+        },
+        {
+            icon: (
+                <Ionicons
+                    name="help-circle-outline"
+                    size={22}
+                    color="#555"
+                />
+            ),
+            label: 'Pusat Bantuan',
+            subtitle: 'FAQ & kontak CS',
+            comingSoon: true,
+        },
+        {
+            icon: (
+                <Ionicons
+                    name="information-circle-outline"
+                    size={22}
+                    color="#555"
+                />
+            ),
+            label: 'Tentang Aplikasi',
+            subtitle: 'Waruung v1.0.0',
+            onPress: () =>
+                showAlert(
+                    'Waruung',
+                    'Versi 1.0.0\n\nAplikasi layanan ojek, kurir, dan makanan.\n© 2026 PT Waruung Teknologi Indonesia',
+                    [{ text: 'OK' }]
+                ),
+        },
     ];
 
+    // ============================================================
+    // Render
+    // ============================================================
     const renderItem = (item: MenuItem, isLast: boolean) => (
         <Pressable
             key={item.label}
@@ -104,13 +235,19 @@ export default function MenuScreen() {
                 !isLast && styles.menuRowBorder,
                 pressed && styles.menuRowPressed,
             ]}
-            onPress={item.onPress}
+            onPress={() => handleMenuItem(item)}
         >
             <View style={styles.menuIconWrap}>{item.icon}</View>
+
             <View style={{ flex: 1 }}>
                 <Text style={styles.menuLabel}>{item.label}</Text>
-                {item.subtitle ? <Text style={styles.menuSubtitle}>{item.subtitle}</Text> : null}
+                {item.subtitle ? (
+                    <Text style={styles.menuSubtitle}>
+                        {item.subtitle}
+                    </Text>
+                ) : null}
             </View>
+
             <Ionicons name="chevron-forward" size={18} color="#bbb" />
         </Pressable>
     );
@@ -120,7 +257,9 @@ export default function MenuScreen() {
     const displayEmail = profile?.email || '-';
     const avatarUri =
         profile?.avatar_url ||
-        `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=1AAD5B&color=fff&size=128`;
+        `https://ui-avatars.com/api/?name=${encodeURIComponent(
+            displayName
+        )}&background=40a3ea&color=fff&size=128`;
 
     return (
         <SafeAreaView style={styles.container} edges={['top']}>
@@ -131,17 +270,32 @@ export default function MenuScreen() {
                 {/* Header profil */}
                 <View style={styles.header}>
                     <View style={styles.profileRow}>
-                        <Image source={{ uri: avatarUri }} style={styles.avatar} />
+                        <Image
+                            source={{ uri: avatarUri }}
+                            style={styles.avatar}
+                        />
                         <View style={{ flex: 1, marginLeft: 14 }}>
-                            <Text style={styles.userName} numberOfLines={1}>{displayName}</Text>
-                            <Text style={styles.userPhone} numberOfLines={1}>{displayPhone}</Text>
-                            <Text style={styles.userEmail} numberOfLines={1}>{displayEmail}</Text>
+                            <Text style={styles.userName} numberOfLines={1}>
+                                {displayName}
+                            </Text>
+                            <Text style={styles.userPhone} numberOfLines={1}>
+                                {displayPhone}
+                            </Text>
+                            <Text style={styles.userEmail} numberOfLines={1}>
+                                {displayEmail}
+                            </Text>
                         </View>
                         <Pressable
                             style={styles.editBtn}
-                            onPress={() => router.push('/edit-profile' as any)}
+                            onPress={() =>
+                                router.push('/edit-profile' as any)
+                            }
                         >
-                            <Ionicons name="pencil" size={16} color="#1AAD5B" />
+                            <Ionicons
+                                name="pencil"
+                                size={16}
+                                color="#40a3ea"
+                            />
                         </Pressable>
                     </View>
                 </View>
@@ -161,29 +315,41 @@ export default function MenuScreen() {
                 </View>
 
                 <Pressable style={styles.logoutBtn} onPress={handleLogout}>
-                    <Ionicons name="log-out-outline" size={20} color="#e5484d" />
+                    <Ionicons
+                        name="log-out-outline"
+                        size={20}
+                        color="#e5484d"
+                    />
                     <Text style={styles.logoutText}>Keluar</Text>
                 </Pressable>
 
                 <Text style={styles.versionText}>Versi 1.0.0</Text>
             </ScrollView>
+
+            {/* ===== AppAlert ===== */}
+            <AppAlert
+                visible={alertState.visible}
+                title={alertState.title}
+                message={alertState.message}
+                buttons={alertState.buttons}
+                onClose={hideAlert}
+            />
+
+            {/* ===== LoadingModal ===== */}
+            <LoadingModal visible={loadingProfile} />
         </SafeAreaView>
     );
 }
 
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#F5F6F8' },
-
-    // ⬇️ margin bottom besar untuk FAB footer
     scrollContent: { paddingBottom: 140 },
 
     header: {
-        backgroundColor: '#1AAD5B',
+        backgroundColor: '#40a3ea',
         paddingHorizontal: 20,
         paddingTop: 16,
         paddingBottom: 28,
-        borderBottomLeftRadius: 24,
-        borderBottomRightRadius: 24,
     },
     profileRow: { flexDirection: 'row', alignItems: 'center' },
     avatar: {
@@ -193,9 +359,21 @@ const styles = StyleSheet.create({
         borderWidth: 2,
         borderColor: '#fff',
     },
-    userName: { fontSize: 18, fontWeight: '700', color: '#fff' },
-    userPhone: { fontSize: 13, color: '#e4f7ea', marginTop: 2 },
-    userEmail: { fontSize: 12, color: '#cfeadb', marginTop: 2 },
+    userName: {
+        fontSize: 18,
+        fontWeight: '700',
+        color: '#fff',
+    },
+    userPhone: {
+        fontSize: 13,
+        color: '#e6f2fc',
+        marginTop: 2,
+    },
+    userEmail: {
+        fontSize: 12,
+        color: '#d0e7f9',
+        marginTop: 2,
+    },
     editBtn: {
         width: 34,
         height: 34,
@@ -238,12 +416,20 @@ const styles = StyleSheet.create({
         width: 36,
         height: 36,
         borderRadius: 10,
-        backgroundColor: '#F0FBF4',
+        backgroundColor: '#EAF4FD',
         alignItems: 'center',
         justifyContent: 'center',
     },
-    menuLabel: { fontSize: 14.5, fontWeight: '600', color: '#222' },
-    menuSubtitle: { fontSize: 12, color: '#999', marginTop: 2 },
+    menuLabel: {
+        fontSize: 14.5,
+        fontWeight: '600',
+        color: '#222',
+    },
+    menuSubtitle: {
+        fontSize: 12,
+        color: '#999',
+        marginTop: 2,
+    },
 
     logoutBtn: {
         flexDirection: 'row',
@@ -258,7 +444,11 @@ const styles = StyleSheet.create({
         marginTop: 24,
         paddingVertical: 14,
     },
-    logoutText: { color: '#e5484d', fontWeight: '700', fontSize: 15 },
+    logoutText: {
+        color: '#e5484d',
+        fontWeight: '700',
+        fontSize: 15,
+    },
 
     versionText: {
         textAlign: 'center',

@@ -16,10 +16,17 @@ export interface SavedPlace {
  *  1. GeoJSON: { type: 'Point', coordinates: [lng, lat] }
  *  2. WKT string: "POINT(lng lat)"
  *  3. Object: { latitude, longitude }
- *  4. String hex EWKB (jarang): "0101000020E610..."
+ *  4. String hex EWKB (jarang)
  */
-function parseLocation(loc: any): { latitude: number; longitude: number } {
-    console.log('[parseLocation] input:', typeof loc, JSON.stringify(loc));
+function parseLocation(loc: any): {
+    latitude: number;
+    longitude: number;
+} {
+    console.log(
+        '[parseLocation] input:',
+        typeof loc,
+        JSON.stringify(loc)
+    );
 
     if (!loc) {
         console.warn('[parseLocation] loc null/undefined');
@@ -41,17 +48,26 @@ function parseLocation(loc: any): { latitude: number; longitude: number } {
     }
 
     // 2. Object dengan coordinates array (tanpa type)
-    if (typeof loc === 'object' && Array.isArray(loc.coordinates) && loc.coordinates.length >= 2) {
+    if (
+        typeof loc === 'object' &&
+        Array.isArray(loc.coordinates) &&
+        loc.coordinates.length >= 2
+    ) {
         const [lng, lat] = loc.coordinates;
         if (typeof lat === 'number' && typeof lng === 'number') {
-            console.log('[parseLocation] coords array OK:', { lat, lng });
+            console.log('[parseLocation] coords array OK:', {
+                lat,
+                lng,
+            });
             return { latitude: lat, longitude: lng };
         }
     }
 
     // 3. WKT string: "POINT(lng lat)"
     if (typeof loc === 'string') {
-        const m = loc.match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
+        const m = loc.match(
+            /POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i
+        );
         if (m) {
             const lng = Number(m[1]);
             const lat = Number(m[2]);
@@ -70,31 +86,46 @@ function parseLocation(loc: any): { latitude: number; longitude: number } {
         return { latitude: loc.latitude, longitude: loc.longitude };
     }
 
-    console.warn('[parseLocation] FORMAT TIDAK DIKENALI:', JSON.stringify(loc));
+    console.warn(
+        '[parseLocation] FORMAT TIDAK DIKENALI:',
+        JSON.stringify(loc)
+    );
     return { latitude: 0, longitude: 0 };
 }
 
+const ALL_KINDS: SavedKind[] = ['home', 'office'];
+
+function makeEmptyMap(): Record<SavedKind, SavedPlace | null> {
+    return { home: null, office: null };
+}
+
 export function useSavedAddresses() {
-    const [saved, setSaved] = useState<Record<SavedKind, SavedPlace | null>>({
-        home: null,
-        office: null,
-    });
+    const [saved, setSaved] = useState<
+        Record<SavedKind, SavedPlace | null>
+    >(makeEmptyMap());
     const [loading, setLoading] = useState(true);
 
     const refresh = useCallback(async () => {
         try {
             console.log('[SAVED] Fetch list dari backend...');
             const list = await api.savedAddresses.list();
-            console.log('[SAVED] Raw list:', JSON.stringify(list, null, 2));
+            console.log(
+                '[SAVED] Raw list:',
+                JSON.stringify(list, null, 2)
+            );
 
-            const next: Record<SavedKind, SavedPlace | null> = { home: null, office: null };
+            const next = makeEmptyMap();
 
             for (const item of list) {
-                if (item.kind === 'home' || item.kind === 'office') {
+                if (ALL_KINDS.includes(item.kind as SavedKind)) {
+                    const kind = item.kind as SavedKind;
                     const coords = parseLocation(item.location);
-                    console.log(`[SAVED] ${item.kind} → coords:`, coords);
+                    console.log(
+                        `[SAVED] ${kind} → coords:`,
+                        coords
+                    );
 
-                    next[item.kind] = {
+                    next[kind] = {
                         name: item.name,
                         address: item.address,
                         coords,
@@ -102,7 +133,11 @@ export function useSavedAddresses() {
                     };
                 }
             }
-            console.log('[SAVED] Parsed result:', JSON.stringify(next, null, 2));
+
+            console.log(
+                '[SAVED] Parsed result:',
+                JSON.stringify(next, null, 2)
+            );
             setSaved(next);
         } catch (err: any) {
             console.warn('[SAVED] Gagal load:', err.message);
@@ -117,12 +152,19 @@ export function useSavedAddresses() {
 
     const save = useCallback(
         async (kind: SavedKind, place: SavedPlace) => {
-            console.log('[SAVED] Simpan', kind, '→', JSON.stringify(place));
+            console.log(
+                '[SAVED] Simpan',
+                kind,
+                '→',
+                JSON.stringify(place)
+            );
+
             if (
                 !place.coords ||
                 typeof place.coords.latitude !== 'number' ||
                 typeof place.coords.longitude !== 'number' ||
-                (place.coords.latitude === 0 && place.coords.longitude === 0)
+                (place.coords.latitude === 0 &&
+                    place.coords.longitude === 0)
             ) {
                 throw new Error('Koordinat alamat tidak valid');
             }
@@ -135,7 +177,10 @@ export function useSavedAddresses() {
                 latitude: place.coords.latitude,
                 longitude: place.coords.longitude,
             });
-            console.log('[SAVED] Tersimpan di backend, refresh...');
+
+            console.log(
+                '[SAVED] Tersimpan di backend, refresh...'
+            );
             await refresh();
         },
         [refresh]
