@@ -1,6 +1,6 @@
 import AppAlert from '@/components/AppAlert';
 import LoadingModal from '@/components/LoadingModal';
-import { api } from '@/lib/api';
+import { api, clearToken } from '@/lib/api'; // ⬅️ TAMBAH clearToken
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -103,10 +103,16 @@ export default function MenuScreen() {
                 text: 'Keluar',
                 style: 'destructive',
                 onPress: async () => {
+                    // 1. Hapus token JWT dari SecureStore (yang dipakai app untuk auth)
+                    await clearToken();
+
+                    // 2. Hapus cache profil & sisa data lokal
                     await AsyncStorage.multiRemove([
-                        'auth_token',
+                        'auth_token',      // legacy — kalau ada sisa, bersihkan
                         'profile',
                     ]);
+
+                    // 3. Redirect ke login
                     router.replace('/(auth)/login' as any);
                 },
             },

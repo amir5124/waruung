@@ -586,4 +586,30 @@ export const api = {
         getMyProfile: () =>
             request<any>('/api/drivers/profile', { auth: true }),
     },
+
+    // ===== Activity (notifikasi pintar) =====
+    // ⬅️ Komentar nyasar dihapus
+    activity: {
+        ping: () =>
+            request<null>('/api/activity/ping', { method: 'POST', auth: true }),
+
+        quote: (body: {
+            service: 'ride' | 'send' | 'food';
+            origin_name: string;
+            origin_lat: number;
+            origin_lng: number;
+            dest_name: string;
+            dest_lat: number;
+            dest_lng: number;
+            option_name: string | null;
+            price: number | null;
+            eta_min: number | null;
+            distance_km: number | null;
+        }) =>
+            request<null>('/api/activity/quote', {
+                method: 'POST',
+                body,
+                auth: true,
+            }),
+    },
 };

@@ -14,7 +14,9 @@ import {
   useOrder,
   type ServiceRoute,
 } from '../contexts/OrderContext';
-import { api } from '../lib/api';
+import { api, getToken } from '../lib/api';
+import { setupBehaviorTracker } from '../lib/behaviorTracker';
+import { registerForPushNotifications } from '../lib/push';
 
 const ONBOARDING_KEY = 'hasSeenOnboarding';
 
@@ -31,8 +33,6 @@ export const useOnboarding = () => useContext(OnboardingContext);
 // ============================================================
 // Helper: tentukan route service dari order
 // ============================================================
-
-/** order.type: 'send' → kurir, 'food' → warfood, 'ride' → lihat tariff */
 const routeFromType = (type?: string): ServiceRoute | null => {
   switch (type) {
     case 'send':
@@ -54,10 +54,6 @@ const routeFromTariff = (code?: string | null): ServiceRoute | null => {
   return null;
 };
 
-/**
- * Urutan: tipe dari data notif → tariff_code dari data notif
- * → ambil order dari API → default ojek motor.
- */
 const resolveService = async (
   data: any,
   orderId: number
@@ -78,6 +74,17 @@ const resolveService = async (
     console.warn('[notif] Gagal resolve service:', err.message);
     return '/services/ojek-motor';
   }
+};
+
+// ⬇️ BARU: tujuan untuk notifikasi pintar (abandoned_quote / reengage)
+// Server mengirim data.option_name (mis. "WarJek S", "WarCar", "WarSend S") dan data.service.
+//  - abandoned_quote -> halaman layanan yang tadi dicek harganya
+//  - reengage        -> halaman layanan favorit user; kalau tidak ada, beranda
+const smartTarget = (data: any): string => {
+  const svc = routeFromTariff(data.option_name) ?? routeFromType(data.service);
+  if (svc) return svc;
+  if (data.service === 'ride') return '/services/ojek-motor';
+  return '/(tabs)';
 };
 
 // ============================================================
@@ -121,12 +128,10 @@ function NotificationHandler() {
     };
   }, []);
 
-  /**
-   * Guard 1: cegah 1 notif diproses 2x
-   */
   const handleTapOnce = (data: any) => {
     if (!data) return;
-    const key = `${data.type}-${data.order_id ?? data.room_id ?? 'none'
+    // ⬇️ quote_session_id ditambahkan supaya nudge berbeda tidak saling dianggap duplikat
+    const key = `${data.type}-${data.order_id ?? data.room_id ?? data.quote_session_id ?? 'none'
       }`;
 
     if (handledRef.current === key) {
@@ -152,6 +157,21 @@ function NotificationHandler() {
       'tariff:',
       data.tariff_code
     );
+
+    // ===== ⬇️ BARU: Notifikasi pintar (belum jadi pesan / lama tidak buka app) =====
+    if (data.type === 'abandoned_quote' || data.type === 'reengage') {
+      const target = smartTarget(data);
+      console.log('[notif] smart notif ->', target, data.option_name);
+
+      setTimeout(() => {
+        if (pathnameRef.current === target) {
+          console.log('[notif] Sudah di', target, '— skip push');
+          return;
+        }
+        router.push(target as any);
+      }, 300);
+      return;
+    }
 
     // ===== Chat =====
     if (data.type === 'chat_message' && data.room_id) {
@@ -193,7 +213,6 @@ function NotificationHandler() {
         return;
       }
 
-      // Tentukan route service (async, fallback ke API)
       resolveService(data, orderId).then((target) => {
         console.log(
           '[notif] redirect ke:',
@@ -223,11 +242,71 @@ function NotificationHandler() {
 }
 
 // ============================================================
+// Behavior Tracker (presence + push register)
+// ============================================================
+// Login terjadi SETELAH layout ini pertama kali tampil, jadi useEffect([]) saja tidak cukup.
+// Di sini token dicek setiap pindah halaman:
+//   - token muncul / berganti (login, ganti akun) -> mulai tracker + daftarkan push token
+//   - token hilang (logout)                       -> hentikan tracker
+function BehaviorTrackerBootstrap() {
+  const pathname = usePathname();
+  const lastTokenRef = useRef<string | null>(null);
+  const cleanupRef = useRef<(() => void) | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const token = await getToken();
+      if (cancelled) return;
+
+      // Logout
+      if (!token) {
+        if (lastTokenRef.current) {
+          console.log('[tracker] logout, hentikan tracker');
+          cleanupRef.current?.();
+          cleanupRef.current = undefined;
+          lastTokenRef.current = null;
+        }
+        return;
+      }
+
+      // Sudah berjalan untuk token ini
+      if (token === lastTokenRef.current) return;
+      lastTokenRef.current = token;
+
+      console.log('[tracker] login terdeteksi: mulai tracker & register push');
+
+      // 1) Presence tracker (untuk notifikasi re-engage)
+      cleanupRef.current?.();
+      cleanupRef.current = setupBehaviorTracker();
+
+      // 2) Expo push token -> profiles.fcm_token (per akun)
+      try {
+        await registerForPushNotifications();
+      } catch (err: any) {
+        console.warn('[tracker] register push gagal:', err?.message);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname]);
+
+  // Bersihkan listener saat layout di-unmount
+  useEffect(() => () => cleanupRef.current?.(), []);
+
+  return null;
+}
+
+// ============================================================
 // Root Layout
 // ============================================================
 export default function RootLayout() {
   const [isLoading, setIsLoading] = useState(true);
   const [hasSeenOnboarding, setHasSeenOnboarding] = useState(false);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -247,6 +326,7 @@ export default function RootLayout() {
       .finally(() => {
         if (isMounted) {
           setIsLoading(false);
+          setReady(true);
         }
       });
 
@@ -289,20 +369,17 @@ export default function RootLayout() {
         value={{ markOnboardingComplete }}
       >
         <NotificationHandler />
+        <BehaviorTrackerBootstrap />
         <Stack screenOptions={{ headerShown: false }}>
-          {/* Onboarding — hanya muncul kalau belum pernah lihat */}
           <Stack.Protected guard={!hasSeenOnboarding}>
             <Stack.Screen name="onboarding" />
           </Stack.Protected>
 
-          {/* Main app — hanya muncul kalau sudah onboarding */}
           <Stack.Protected guard={hasSeenOnboarding}>
             <Stack.Screen name="(auth)" />
             <Stack.Screen name="(tabs)" />
             <Stack.Screen name="services" />
             <Stack.Screen name="chat/[roomId]" />
-
-            {/* ⬇️ TAMBAH: halaman saved addresses */}
             <Stack.Screen name="saved-addresses" />
             <Stack.Screen name="save-address/[kind]" />
           </Stack.Protected>

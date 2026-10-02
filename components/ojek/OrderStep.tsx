@@ -2,6 +2,7 @@ import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
 import { useTariffs } from '@/hooks/use-tariffs';
 import { Tariff } from '@/lib/api';
+import { trackQuote } from '@/lib/behaviorTracker';
 import { getRoute } from '@/services/google-maps';
 import type { OrderPayload, PlaceLoc, RouteInfo, ServiceType } from '@/types/ojek';
 import { AntDesign, Ionicons } from '@expo/vector-icons';
@@ -274,6 +275,50 @@ export default function OrderStep({
     const priceOf = (t: Tariff) => calcPrice(t.code, route?.distanceMeters ?? 0);
 
     const currentPrice = selected ? priceOf(selected) : 0;
+
+    // ============================================================
+    // Track quote untuk notifikasi "abandoned quote"
+    // OrderStep ini khusus ride (motor & mobil).
+    // WarSend & WarFood punya OrderStep sendiri.
+    // Ter-trigger tiap: harga tampil, user ganti armada, rute berubah.
+    // Di-debounce 1.5 detik di dalam trackQuote() — aman dari spam.
+    // ============================================================
+    useEffect(() => {
+        if (!origin || !destination) return;
+        if (!selected) return;
+        if (!route || route.distanceMeters <= 0) return;
+        if (currentPrice <= 0) return;
+
+        trackQuote({
+            service: 'ride',
+            origin: {
+                name: origin.name || origin.address || 'Lokasi jemput',
+                coords: {
+                    latitude: origin.coords.latitude,
+                    longitude: origin.coords.longitude,
+                },
+            },
+            destination: {
+                name: destination.name || destination.address || 'Tujuan',
+                coords: {
+                    latitude: destination.coords.latitude,
+                    longitude: destination.coords.longitude,
+                },
+            },
+            optionName: selected.label,        // 'WarJek' / 'WarCar'
+            price: currentPrice,
+            etaMin: selected.eta_min,
+            distanceKm: route.distanceMeters / 1000,
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [
+        selected?.code,
+        currentPrice,
+        route?.distanceMeters,
+        origin?.name,
+        destination?.name,
+    ]);
+
     const isSaldoEnough = DUMMY_SALDO >= currentPrice;
     const saldoText = `Saldo: ${formatRupiah(DUMMY_SALDO)}`;
 

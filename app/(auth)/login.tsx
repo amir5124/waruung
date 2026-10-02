@@ -1,4 +1,5 @@
 import { api, saveToken } from '@/lib/api';
+import { setupBehaviorTracker } from '@/lib/behaviorTracker'; // ⬅️ TAMBAH
 import { registerForPushNotifications } from '@/lib/push';
 import { AntDesign, Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -93,7 +94,25 @@ export default function LoginScreen() {
             await AsyncStorage.setItem('profile', JSON.stringify(profile));
             console.log('[LOGIN] Profil tersimpan di AsyncStorage');
 
-            // 5. Registrasi push notification (TERPISAH dari login:
+            // ============================================================
+            // 5. Setup behavior tracker (presence ping)
+            //    → supaya user_presence terisi → edge function bisa kirim
+            //      notif re-engage kalau user lama tidak buka app.
+            //    Jalankan hanya untuk customer (driver punya flow sendiri).
+            // ============================================================
+            if (res.role === 'customer') {
+                try {
+                    setupBehaviorTracker();
+                    console.log('[LOGIN] Behavior tracker aktif');
+                } catch (trackerErr: any) {
+                    console.warn(
+                        '[LOGIN] Setup tracker gagal (login tetap lanjut):',
+                        trackerErr?.message
+                    );
+                }
+            }
+
+            // 6. Registrasi push notification (TERPISAH dari login:
             //    kalau gagal, login tetap berhasil)
             try {
                 console.log('[LOGIN] Memulai registrasi push notification...');
@@ -106,13 +125,18 @@ export default function LoginScreen() {
                     });
                     await AsyncStorage.setItem('profile', JSON.stringify(updated));
                 } else {
-                    console.warn('[LOGIN] Push token tidak didapat (mungkin izin ditolak atau di emulator)');
+                    console.warn(
+                        '[LOGIN] Push token tidak didapat (mungkin izin ditolak atau di emulator)'
+                    );
                 }
             } catch (pushErr: any) {
-                console.warn('[LOGIN] Registrasi push gagal (login tetap lanjut):', pushErr?.message);
+                console.warn(
+                    '[LOGIN] Registrasi push gagal (login tetap lanjut):',
+                    pushErr?.message
+                );
             }
 
-            // 6. Redirect berdasarkan role
+            // 7. Redirect berdasarkan role
             console.log('[LOGIN] Login sukses, redirect ke role:', res.role);
             if (res.role === 'driver') {
                 router.replace('/driver-home' as any);
@@ -121,7 +145,10 @@ export default function LoginScreen() {
             }
         } catch (err: any) {
             console.error('[LOGIN] Gagal:', err.message);
-            showErrorModal('Login Gagal', err.message || 'Periksa email dan kata sandi Anda.');
+            showErrorModal(
+                'Login Gagal',
+                err.message || 'Periksa email dan kata sandi Anda.'
+            );
         } finally {
             setLoading(false);
         }
@@ -197,7 +224,7 @@ export default function LoginScreen() {
                         <Text style={styles.forgotText}>Lupa Kata Sandi?</Text>
                     </TouchableOpacity>
 
-                    {/* Tombol Masuk (tanpa spinner, loading pakai modal) */}
+                    {/* Tombol Masuk */}
                     <TouchableOpacity
                         style={[styles.primaryButton, loading && { opacity: 0.6 }]}
                         activeOpacity={0.85}

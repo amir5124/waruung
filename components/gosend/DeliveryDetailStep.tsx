@@ -1,5 +1,6 @@
 import { colors } from '@/constants/ojek-theme';
 import { api, Tariff } from '@/lib/api';
+import { trackQuote } from '@/lib/behaviorTracker';
 import type { ContactInfo, GoSendCourierOption, PackageInfo, PlaceLoc } from '@/types/gosend';
 import { Ionicons } from '@expo/vector-icons';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -214,6 +215,50 @@ export default function DeliveryDetailStep({
 
     const selectedOption =
         courierOptions.find((o) => o.id === selectedOptionId) ?? courierOptions[0];
+
+    // ============================================================
+    // Track quote untuk notifikasi "abandoned quote" (WarSend)
+    // Dipanggil saat: harga tampil, user ganti armada, rute berubah
+    // Debounce 1.5 detik ada di dalam trackQuote() — aman dari spam
+    // ============================================================
+    useEffect(() => {
+        if (!origin || !destination) return;
+        if (!selectedOption) return;
+        if (!route || route.distanceKm <= 0) return;
+        if (selectedOption.price <= 0) return;
+
+        // Ambil eta_min asli dari tarif backend (bukan dari string "25 menit")
+        const tariff = tariffs.find((t) => t.code === selectedOption.id);
+
+        trackQuote({
+            service: 'send',
+            origin: {
+                name: origin.name || origin.address || 'Lokasi jemput',
+                coords: {
+                    latitude: origin.coords.latitude,
+                    longitude: origin.coords.longitude,
+                },
+            },
+            destination: {
+                name: destination.name || destination.address || 'Tujuan',
+                coords: {
+                    latitude: destination.coords.latitude,
+                    longitude: destination.coords.longitude,
+                },
+            },
+            optionName: selectedOption.name,                    // 'WarSend S' / 'WarSend L'
+            price: selectedOption.price,                        // harga tariff
+            etaMin: tariff?.eta_min,                    // dari DB
+            distanceKm: route.distanceKm,                       // jarak aktual OSRM
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [
+        selectedOption?.id,
+        selectedOption?.price,
+        route?.distanceKm,
+        origin?.name,
+        destination?.name,
+    ]);
 
     const hasContactAndType = !!(sender && receiver && packageInfo.type);
     const hasSize = !!packageInfo.size;
