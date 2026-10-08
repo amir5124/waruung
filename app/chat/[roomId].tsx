@@ -7,6 +7,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    AppState,
     FlatList,
     Image,
     KeyboardAvoidingView,
@@ -106,6 +107,17 @@ export default function ChatScreen() {
         })();
     }, []);
 
+    // Ambil ulang semua pesan (dipakai saat reconnect / app kembali aktif)
+    const refetchMessages = async () => {
+        try {
+            const data = await api.chat.listMessages(roomIdNum);
+            setMessages(data);
+            api.chat.markRead(roomIdNum).catch(() => { });
+        } catch (err: any) {
+            console.warn('[chat] refetch gagal:', err.message);
+        }
+    };
+
     // Load pesan awal — dengan timeout
     useEffect(() => {
         let alive = true;
@@ -143,37 +155,35 @@ export default function ChatScreen() {
         };
     }, [roomIdNum]);
 
-    // Subscribe Supabase Realtime
+    // Subscribe Supabase Realtime (Broadcast dari backend)
     useEffect(() => {
-        console.log('[chat] === SUBSCRIBE REALTIME ===');
+        console.log('[chat] === SUBSCRIBE REALTIME (broadcast) ===');
+        let firstSubscribe = true;
+
         const channel = supabase
             .channel(`chat:${roomIdNum}`)
-            .on(
-                'postgres_changes',
-                {
-                    event: 'INSERT',
-                    schema: 'public',
-                    table: 'chat_messages',
-                    filter: `room_id=eq.${roomIdNum}`,
-                },
-                (payload) => {
-                    const newMsg = payload.new as ChatMessage;
-                    console.log('[chat] 🔔 Realtime pesan baru:', newMsg.id, newMsg.message_type);
+            .on('broadcast', { event: 'new_message' }, ({ payload }) => {
+                const newMsg = payload as ChatMessage;
+                console.log('[chat] 🔔 Broadcast pesan baru:', newMsg.id, newMsg.message_type);
 
-                    setMessages((prev) => {
-                        if (prev.some((m) => m.id === newMsg.id)) return prev;
-                        return [...prev, newMsg];
-                    });
+                setMessages((prev) =>
+                    prev.some((m) => m.id === newMsg.id) ? prev : [...prev, newMsg]
+                );
 
-                    if (newMsg.sender_id !== myIdRef.current) {
-                        api.chat.markRead(roomIdNum).catch(() => { });
-                    }
+                if (newMsg.sender_id !== myIdRef.current) {
+                    api.chat.markRead(roomIdNum).catch(() => { });
                 }
-            )
+            })
             .subscribe((status, err) => {
-                console.log('[chat] Realtime status:', status);
-                if (err) {
-                    console.log('[chat] Realtime error:', JSON.stringify(err, null, 2));
+                console.log('[chat] Realtime status:', status, err ?? '');
+
+                // Setelah reconnect, ambil ulang pesan yang mungkin terlewat
+                if (status === 'SUBSCRIBED') {
+                    if (firstSubscribe) {
+                        firstSubscribe = false;
+                    } else {
+                        refetchMessages();
+                    }
                 }
             });
 
@@ -186,6 +196,14 @@ export default function ChatScreen() {
                 channelRef.current = null;
             }
         };
+    }, [roomIdNum]);
+
+    // Refetch saat app kembali ke foreground (Broadcast tidak menyimpan pesan yang terlewat)
+    useEffect(() => {
+        const sub = AppState.addEventListener('change', (state) => {
+            if (state === 'active') refetchMessages();
+        });
+        return () => sub.remove();
     }, [roomIdNum]);
 
     // Auto-scroll ke bawah saat pesan baru

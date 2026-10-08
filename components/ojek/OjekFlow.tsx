@@ -1,3 +1,4 @@
+// components/ojek/OjekFlow.tsx
 import AppAlert from '@/components/AppAlert';
 import { useOrder } from '@/contexts/OrderContext';
 import { useAppAlert } from '@/hooks/use-app-alert';
@@ -39,12 +40,32 @@ type Props = {
     onOrder?: (payload: OrderPayload) => void;
 };
 
+type LatLng = { latitude: number; longitude: number };
+type ApiDriver = NonNullable<OrderResponse['driver']>;
+
 const DEFAULT_LABEL: Record<SavedKind, string> = {
     home: 'Rumah',
     office: 'Kantor',
 };
 const FALLBACK_COORDS = { latitude: -6.2, longitude: 106.63 };
 const POLL_INTERVAL = 3000;
+
+/** Ubah data driver dari API menjadi objek Driver untuk UI */
+function buildDriver(d: ApiDriver, fallback: LatLng): Driver {
+    return {
+        id: d.id,
+        name: d.full_name ?? 'Driver',
+        phone: d.phone ?? '',
+        photo: d.avatar_url ?? undefined,
+        plate: d.plate_number ?? 'B 0000 XXX',
+        vehicle: d.vehicle_brand ?? 'Motor',
+        color: d.vehicle_type === 'mobil' ? 'Mobil' : 'Motor',
+        rating: d.rating_avg ?? 5.0,
+        trips: d.total_trips ?? 0,
+        coords: d.coords ?? fallback,
+        vehicleType: d.vehicle_type === 'mobil' ? 'mobil' : 'motor',
+    };
+}
 
 export default function OjekFlow({
     serviceType,
@@ -56,9 +77,6 @@ export default function OjekFlow({
     const { saved, save, remove } = useSavedAddresses();
     const { alertState, showAlert, hideAlert } = useAppAlert();
 
-    // ============================================================
-    // Guard global dari context (bukan ref per-mount)
-    // ============================================================
     const {
         activeOrderId,
         setActiveOrder,
@@ -66,6 +84,11 @@ export default function OjekFlow({
         setBootingOrderId,
         bootedOrderId,
         setBootedOrderId,
+        // ✅ Baru
+        pendingPaymentOrderId,
+        setPendingPaymentOrderId,
+        bootingFromPayment,
+        setBootingFromPayment,
     } = useOrder();
 
     const [step, setStep] = useState<Step>('home');
@@ -73,6 +96,7 @@ export default function OjekFlow({
     const [destination, setDestination] = useState<PlaceLoc | null>(null);
     const [orderPayload, setOrderPayload] = useState<OrderPayload | null>(null);
     const [orderId, setOrderId] = useState<number | null>(null);
+    const [orderStatus, setOrderStatus] = useState<string>('pending');
     const [driver, setDriver] = useState<Driver | null>(null);
     const [focusField, setFocusField] = useState<SearchField>('destination');
     const [saveKind, setSaveKind] = useState<SavedKind>('home');
@@ -80,11 +104,15 @@ export default function OjekFlow({
     const [bootingFromNotif, setBootingFromNotif] = useState(false);
     const originEdited = useRef(false);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const pollTokenRef = useRef(0);
+    const lastStatusRef = useRef<string | null>(null);
     const stepRef = useRef<Step>('home');
     stepRef.current = step;
+    const orderPayloadRef = useRef<OrderPayload | null>(null);
+    orderPayloadRef.current = orderPayload;
 
     // ============================================================
-    // Asal otomatis = lokasi pengguna (HANYA kalau tidak boot dari notif)
+    // Asal otomatis = lokasi pengguna
     // ============================================================
     useEffect(() => {
         if (bootingFromNotif) return;
@@ -116,56 +144,42 @@ export default function OjekFlow({
     }, [user.coords, bootingFromNotif, orderId]);
 
     // ============================================================
-    // BOOT dari notifikasi — pakai guard dari context
+    // ✅ BOOT dari notif / setelah payment paid
+    // ============================================================
+    // components/ojek/OjekFlow.tsx
+
+    // ============================================================
+    // ✅ BOOT — HANYA dari activeOrderId (notif / payment paid)
     // ============================================================
     useEffect(() => {
-        if (!activeOrderId) return;
+        const bootOrderId = activeOrderId;   // ⬅️ HANYA activeOrderId
+        if (!bootOrderId) return;
 
-        // Sudah pernah boot order ini → skip
-        if (bootedOrderId === activeOrderId) {
-            console.log(
-                '[OJEKFLOW] Skip boot — sudah boot order:',
-                activeOrderId
-            );
-            return;
-        }
-
-        // Sedang boot order ini (dari mount ke-2) → skip
-        if (bootingOrderId === activeOrderId) {
-            console.log(
-                '[OJEKFLOW] Skip boot — boot sedang jalan untuk order ini'
-            );
-            return;
-        }
-
-        // Sedang boot order lain → skip
-        if (bootingOrderId !== null) {
-            console.log('[OJEKFLOW] Skip boot — sedang boot order lain');
-            return;
-        }
+        if (bootedOrderId === bootOrderId) return;
+        if (bootingOrderId === bootOrderId) return;
+        if (bootingOrderId !== null) return;
 
         const boot = async () => {
-            setBootingOrderId(activeOrderId);
-            console.log('[OJEKFLOW] Boot dari notif, order id:', activeOrderId);
+            setBootingOrderId(bootOrderId);
+            console.log(
+                '[OJEKFLOW] Boot, order id:',
+                bootOrderId,
+                'from payment?',
+                bootingFromPayment
+            );
             setBootingFromNotif(true);
 
             try {
-                const order: OrderResponse = await api.getOrder(activeOrderId);
+                const order: OrderResponse = await api.getOrder(bootOrderId);
                 console.log(
-                    '[OJEKFLOW] Order dari notif:',
+                    '[OJEKFLOW] Order:',
                     order.status,
-                    order.type,
-                    order.tariff_code
+                    order.payment_method,
+                    order.payment_status
                 );
 
-                const pickupCoords = order.pickup_coords ?? {
-                    latitude: -7.0185,
-                    longitude: 109.7778,
-                };
-                const dropoffCoords = order.dropoff_coords ?? {
-                    latitude: -7.0185,
-                    longitude: 109.7778,
-                };
+                const pickupCoords = order.pickup_coords ?? FALLBACK_COORDS;
+                const dropoffCoords = order.dropoff_coords ?? FALLBACK_COORDS;
 
                 const payload: OrderPayload = {
                     service: 'motor',
@@ -184,49 +198,78 @@ export default function OjekFlow({
                     },
                     distanceMeters: (order.distance_km ?? 0) * 1000,
                     durationSec: (order.duration_min ?? 0) * 60,
+                    payment_method: (order.payment_method as any) ?? 'cash',
+                    bank_code: undefined,
                 };
 
                 setOrderPayload(payload);
-                setOrderId(activeOrderId);
+                setOrderId(bootOrderId);
+                setOrderStatus(order.status);
                 setOrigin(payload.origin);
                 setDestination(payload.destination);
 
                 if (order.driver) {
-                    const d: Driver = {
-                        id: order.driver.id,
-                        name: order.driver.full_name ?? 'Driver',
-                        phone: order.driver.phone ?? '',
-                        photo: order.driver.avatar_url ?? undefined,
-                        plate: order.driver.plate_number ?? 'B 0000 XXX',
-                        vehicle: order.driver.vehicle_brand ?? 'Motor',
-                        color:
-                            order.driver.vehicle_type === 'mobil'
-                                ? 'Mobil'
-                                : 'Motor',
-                        rating: order.driver.rating_avg ?? 5.0,
-                        trips: order.driver.total_trips ?? 0,
-                        coords: order.driver.coords ?? pickupCoords,
-                        vehicleType:
-                            order.driver.vehicle_type === 'mobil'
-                                ? 'mobil'
-                                : 'motor',
-                    };
-                    setDriver(d);
+                    setDriver(buildDriver(order.driver, pickupCoords));
                 }
 
+                // ═══════════════════════════════════════════════════
+                // CASE 1: QRIS/VA masih pending → redirect ke /payment
+                // ═══════════════════════════════════════════════════
+                const needsPayment =
+                    (order.payment_method === 'qris' ||
+                        order.payment_method === 'bank_transfer') &&
+                    order.payment_status === 'pending';
+
+                if (needsPayment) {
+                    console.log(
+                        '[OJEKFLOW] Payment masih pending → redirect /payment'
+                    );
+                    setStep('order');
+                    router.push({
+                        pathname: '/payment/[orderId]',
+                        params: { orderId: String(bootOrderId) },
+                    } as any);
+
+                    setBootedOrderId(bootOrderId);
+                    setBootingFromNotif(false);
+                    setBootingOrderId(null);
+                    setBootingFromPayment(false);
+                    return;
+                }
+
+                // ═══════════════════════════════════════════════════
+                // CASE 2: Payment paid + status pending → searching
+                // ═══════════════════════════════════════════════════
+                const canSearch =
+                    order.status === 'pending' &&
+                    (order.payment_status === 'paid' ||
+                        order.payment_method === 'cash' ||
+                        order.payment_method === 'wallet');
+
+                if (canSearch) {
+                    console.log(
+                        '[OJEKFLOW] Payment paid/cash → step searching'
+                    );
+                    setStep('searching');
+                    startPolling(bootOrderId);
+
+                    setBootingFromPayment(false);
+                    setBootedOrderId(bootOrderId);
+                    setBootingFromNotif(false);
+                    setBootingOrderId(null);
+                    return;
+                }
+
+                // CASE 3: Status lain
                 switch (order.status) {
-                    case 'pending':
-                        setStep('searching');
-                        startPolling(activeOrderId);
-                        break;
                     case 'accepted':
-                        setStep('driverFound');
-                        startPolling(activeOrderId);
-                        break;
                     case 'arrived':
+                        setStep('driverFound');
+                        startPolling(bootOrderId);
+                        break;
                     case 'in_progress':
                         setStep('onTrip');
-                        startPolling(activeOrderId);
+                        startPolling(bootOrderId);
                         break;
                     case 'completed':
                         setStep('summary');
@@ -238,37 +281,40 @@ export default function OjekFlow({
                         setStep('home');
                 }
 
-                // Tandai sudah boot
-                setBootedOrderId(activeOrderId);
-                console.log('[OJEKFLOW] Boot selesai, status:', order.status);
+                setBootingFromPayment(false);
+                setBootedOrderId(bootOrderId);
+                setBootingFromNotif(false);
+                setBootingOrderId(null);
             } catch (err: any) {
-                console.error(
-                    '[OJEKFLOW] Gagal boot dari notif:',
-                    err.message
-                );
+                console.error('[OJEKFLOW] Gagal boot:', err.message);
                 showAlert(
                     'Gagal Buka Order',
                     err.message || 'Coba buka manual.'
                 );
-            } finally {
                 setBootingFromNotif(false);
                 setBootingOrderId(null);
+                setBootingFromPayment(false);
             }
         };
 
         boot();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeOrderId, bootedOrderId, bootingOrderId]);
+    }, [
+        activeOrderId,          // ⬅️ HANYA ini
+        bootedOrderId,
+        bootingOrderId,
+        bootingFromPayment,
+        // ❌ HAPUS: pendingPaymentOrderId
+    ]);
 
     // ============================================================
-    // Clear activeOrderId setelah boot selesai
+    // Clear activeOrderId setelah boot
     // ============================================================
     useEffect(() => {
         if (bootingFromNotif) return;
         if (!activeOrderId) return;
 
         const t = setTimeout(() => {
-            console.log('[OJEKFLOW] Clear activeOrderId dari context');
             setActiveOrder(null);
         }, 800);
 
@@ -280,16 +326,106 @@ export default function OjekFlow({
     // ============================================================
     useEffect(() => {
         if (!bootedOrderId) return;
-
         const t = setTimeout(() => {
-            console.log('[OJEKFLOW] Reset bootedOrderId:', bootedOrderId);
             setBootedOrderId(null);
         }, 30000);
-
         return () => clearTimeout(t);
     }, [bootedOrderId, setBootedOrderId]);
 
-    // ---- Batalkan pesanan ----
+    // ---- Polling ----
+    const stopPolling = () => {
+        pollTokenRef.current += 1;
+        if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+        }
+    };
+
+    const startPolling = (id: number) => {
+        stopPolling();
+        lastStatusRef.current = null;
+        const token = pollTokenRef.current;
+
+        pollRef.current = setInterval(async () => {
+            try {
+                const order = await api.getOrder(id);
+                if (token !== pollTokenRef.current) return;
+
+                if (order.status !== lastStatusRef.current) {
+                    lastStatusRef.current = order.status;
+                    console.log('[OJEKFLOW] Status order:', order.status);
+                }
+
+                setOrderStatus(order.status);
+
+                if (order.driver) {
+                    const d = order.driver;
+                    const fallback =
+                        orderPayloadRef.current?.origin.coords ??
+                        FALLBACK_COORDS;
+
+                    setDriver((prev) => {
+                        if (!prev || prev.id !== d.id) {
+                            return buildDriver(d, fallback);
+                        }
+                        const c = d.coords;
+                        if (!c) return prev;
+                        if (
+                            prev.coords.latitude === c.latitude &&
+                            prev.coords.longitude === c.longitude
+                        ) {
+                            return prev;
+                        }
+                        return { ...prev, coords: c };
+                    });
+                }
+
+                const cur = stepRef.current;
+
+                switch (order.status) {
+                    case 'accepted':
+                    case 'arrived':
+                        if (cur === 'searching') setStep('driverFound');
+                        break;
+
+                    case 'in_progress':
+                        if (cur === 'searching' || cur === 'driverFound') {
+                            setStep('onTrip');
+                        }
+                        break;
+
+                    case 'completed':
+                        if (
+                            cur === 'searching' ||
+                            cur === 'driverFound' ||
+                            cur === 'onTrip'
+                        ) {
+                            stopPolling();
+                            setStep('summary');
+                        }
+                        break;
+
+                    case 'cancelled':
+                        stopPolling();
+                        showAlert(
+                            'Pesanan dibatalkan',
+                            order.cancellation_reason ??
+                            'Tidak ada driver yang menerima.'
+                        );
+                        setOrderId(null);
+                        setDriver(null);
+                        setStep('order');
+                        break;
+                }
+            } catch (err: any) {
+                console.warn('Polling error:', err.message);
+            }
+        }, POLL_INTERVAL);
+    };
+
+    useEffect(() => () => stopPolling(), []);
+
+    // ---- Batalkan ----
     const confirmCancel = () => {
         showAlert(
             'Batalkan pesanan?',
@@ -324,98 +460,7 @@ export default function OjekFlow({
         );
     };
 
-    // ---- Polling status order ----
-    const stopPolling = () => {
-        if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-        }
-    };
-
-    const startPolling = (id: number) => {
-        stopPolling();
-        pollRef.current = setInterval(async () => {
-            try {
-                const order = await api.getOrder(id);
-                console.log('[OJEKFLOW] Polling:', order.status, {
-                    driver_name: order.driver?.full_name,
-                    driver_coords: order.driver?.coords,
-                });
-
-                if (order.status === 'accepted' && order.driver) {
-                    setDriver((prev) => {
-                        if (prev) return prev;
-                        return {
-                            id: order.driver!.id,
-                            name: order.driver!.full_name ?? 'Driver',
-                            phone: order.driver!.phone ?? '',
-                            photo: order.driver!.avatar_url ?? undefined,
-                            plate: order.driver!.plate_number ?? 'B 0000 XXX',
-                            vehicle: order.driver!.vehicle_brand ?? 'Motor',
-                            color:
-                                order.driver!.vehicle_type === 'mobil'
-                                    ? 'Mobil'
-                                    : 'Motor',
-                            rating: order.driver!.rating_avg ?? 5.0,
-                            trips: order.driver!.total_trips ?? 0,
-                            coords: order.driver!.coords ?? {
-                                latitude:
-                                    orderPayload?.origin.coords.latitude ??
-                                    FALLBACK_COORDS.latitude,
-                                longitude:
-                                    orderPayload?.origin.coords.longitude ??
-                                    FALLBACK_COORDS.longitude,
-                            },
-                            vehicleType:
-                                order.driver!.vehicle_type === 'mobil'
-                                    ? 'mobil'
-                                    : 'motor',
-                        };
-                    });
-
-                    if (stepRef.current === 'searching') {
-                        setStep('driverFound');
-                    }
-                }
-
-                if (
-                    order.status === 'arrived' &&
-                    stepRef.current === 'driverFound'
-                ) {
-                    setStep('onTrip');
-                }
-
-                if (order.status === 'in_progress') {
-                    // tetap OnTripStep
-                }
-
-                if (
-                    order.status === 'completed' &&
-                    stepRef.current === 'onTrip'
-                ) {
-                    stopPolling();
-                    setStep('summary');
-                }
-
-                if (order.status === 'cancelled') {
-                    stopPolling();
-                    showAlert(
-                        'Pesanan dibatalkan',
-                        order.cancellation_reason ??
-                        'Tidak ada driver yang menerima.'
-                    );
-                    setOrderId(null);
-                    setStep('order');
-                }
-            } catch (err: any) {
-                console.warn('Polling error:', err.message);
-            }
-        }, POLL_INTERVAL);
-    };
-
-    useEffect(() => () => stopPolling(), []);
-
-    // ---- Tombol back Android ----
+    // ---- Back handler ----
     useEffect(() => {
         const back: Record<Step, Step | null> = {
             home: null,
@@ -429,17 +474,20 @@ export default function OjekFlow({
             summary: null,
             saveAddress: 'home',
         };
-        const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-            if (step === 'driverFound') {
-                confirmCancel();
+        const sub = BackHandler.addEventListener(
+            'hardwareBackPress',
+            () => {
+                if (step === 'driverFound') {
+                    confirmCancel();
+                    return true;
+                }
+                if (step === 'onTrip' || step === 'summary') return true;
+                const prev = back[step];
+                if (prev) setStep(prev);
+                else onExit();
                 return true;
             }
-            if (step === 'onTrip' || step === 'summary') return true;
-            const prev = back[step];
-            if (prev) setStep(prev);
-            else onExit();
-            return true;
-        });
+        );
         return () => sub.remove();
     }, [step, onExit]);
 
@@ -452,6 +500,7 @@ export default function OjekFlow({
         stopPolling();
         setOrderPayload(null);
         setOrderId(null);
+        setOrderStatus('pending');
         setDriver(null);
         setDestination(null);
         setStep('home');
@@ -475,9 +524,7 @@ export default function OjekFlow({
             return;
         }
         try {
-            console.log('[OJEKFLOW] Buka chat untuk order:', orderId);
             const room = await api.chat.openRoom(orderId);
-            console.log('[OJEKFLOW] Room:', room);
             router.push(
                 `/chat/${room.id}?peerName=${encodeURIComponent(
                     driver?.name ?? 'Driver'
@@ -489,9 +536,14 @@ export default function OjekFlow({
         }
     };
 
+    // ============================================================
+    // ✅ HANDLE ORDER — cek payment SEBELUM setStep
+    // ============================================================
+    // components/ojek/OjekFlow.tsx
+
     const handleOrder = async (p: OrderPayload) => {
         setOrderPayload(p);
-        setStep('searching');
+        setOrderStatus('pending');
         onOrder?.(p);
 
         try {
@@ -507,27 +559,55 @@ export default function OjekFlow({
                 dropoff_lng: p.destination.coords.longitude,
                 distance_km: p.distanceMeters / 1000,
                 duration_min: Math.ceil(p.durationSec / 60),
-                payment_method: 'cash',
+                payment_method: p.payment_method ?? 'cash',
+                bank_code: p.bank_code,
                 tariff_code: p.optionId,
                 option_name: p.optionName,
             });
 
             console.log('[OJEKFLOW] Order created:', {
                 id: order.id,
-                tariff_code: order.tariff_code,
-                delivery_fee: order.delivery_fee,
+                payment_method: order.payment_method,
+                payment_status: order.payment_status,
             });
 
             setOrderId(order.id);
+
+            const needsPayment =
+                (p.payment_method === 'qris' ||
+                    p.payment_method === 'bank_transfer') &&
+                order.payment_status === 'pending';
+
+            if (needsPayment) {
+                console.log(
+                    '[OJEKFLOW] Payment pending → redirect ke /payment'
+                );
+
+                setStep('order');
+
+                // ✅ JANGAN set activeOrder / pendingPaymentOrderId
+                //    Cukup redirect — biar payment screen yang trigger boot nanti
+
+                router.push({
+                    pathname: '/payment/[orderId]',
+                    params: { orderId: String(order.id) },
+                } as any);
+                return;
+            }
+
+            // Cash / Wallet → langsung searching
+            console.log(
+                '[OJEKFLOW] Payment paid/cash → start searching driver'
+            );
+            setStep('searching');
             startPolling(order.id);
         } catch (err: any) {
             showAlert('Gagal membuat pesanan', err.message || 'Coba lagi.');
             setStep('order');
         }
     };
-
     // ============================================================
-    // Loading saat boot dari notif
+    // Loading saat boot
     // ============================================================
     if (bootingFromNotif) {
         return (
@@ -541,7 +621,6 @@ export default function OjekFlow({
                 }}
             >
                 <ActivityIndicator size="large" color="#40a3ea" />
-
             </View>
         );
     }
@@ -581,7 +660,8 @@ export default function OjekFlow({
                 name: shortName(existing.address),
             }
             : {
-                coords: origin?.coords ?? user.coords ?? FALLBACK_COORDS,
+                coords:
+                    origin?.coords ?? user.coords ?? FALLBACK_COORDS,
                 address: origin?.address ?? '',
                 name: origin?.name ?? '',
             };
@@ -629,7 +709,11 @@ export default function OjekFlow({
                     setStep('pickup');
                 }}
                 onPickOnMap={(f: SearchField) =>
-                    setStep(f === 'destination' ? 'pickDestination' : 'pickup')
+                    setStep(
+                        f === 'destination'
+                            ? 'pickDestination'
+                            : 'pickup'
+                    )
                 }
             />
         );
@@ -657,7 +741,8 @@ export default function OjekFlow({
     }
 
     if (step === 'pickup') {
-        const fallback = destination?.coords ?? user.coords ?? FALLBACK_COORDS;
+        const fallback =
+            destination?.coords ?? user.coords ?? FALLBACK_COORDS;
         const initial: PlaceLoc = origin ?? {
             name: '',
             address: '',
@@ -670,7 +755,10 @@ export default function OjekFlow({
                 initial={initial}
                 userLocation={
                     user.coords
-                        ? { coords: user.coords, accuracy: user.accuracy }
+                        ? {
+                            coords: user.coords,
+                            accuracy: user.accuracy,
+                        }
                         : null
                 }
                 onBack={() => setStep('search')}
@@ -718,11 +806,9 @@ export default function OjekFlow({
             <DriverFoundStep
                 payload={orderPayload}
                 driver={driver}
+                status={orderStatus}
                 onBack={confirmCancel}
                 onCancel={confirmCancel}
-                onArrived={() => {
-                    // tidak dipakai — step berpindah dari polling backend
-                }}
                 onChat={openChat}
             />
         );
@@ -734,9 +820,6 @@ export default function OjekFlow({
                 payload={orderPayload}
                 driver={driver}
                 onBack={() => { }}
-                onArrived={() => {
-                    // tidak dipakai — step berpindah dari polling backend
-                }}
                 onChat={openChat}
             />
         );
@@ -748,12 +831,6 @@ export default function OjekFlow({
                 payload={orderPayload}
                 driver={driver}
                 onSubmit={async (rating, message, tags) => {
-                    console.log('[OJEKFLOW] Submit rating:', {
-                        rating,
-                        message,
-                        tags,
-                    });
-
                     if (orderId) {
                         try {
                             const res = await api.submitRating({
@@ -762,7 +839,10 @@ export default function OjekFlow({
                                 comment: message,
                                 tags,
                             });
-                            console.log('[OJEKFLOW] Rating tersimpan:', res);
+                            console.log(
+                                '[OJEKFLOW] Rating tersimpan:',
+                                res
+                            );
                         } catch (err: any) {
                             console.warn(
                                 '[OJEKFLOW] Gagal simpan rating:',
@@ -770,7 +850,6 @@ export default function OjekFlow({
                             );
                         }
                     }
-
                     finishTrip();
                 }}
                 onSkip={finishTrip}

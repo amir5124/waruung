@@ -1,3 +1,4 @@
+// contexts/OrderContext.tsx
 import React, {
     createContext,
     ReactNode,
@@ -12,6 +13,7 @@ export type ServiceRoute =
     | '/services/warfood';
 
 type OrderContextType = {
+    // ── Order aktif (untuk boot dari notif / setelah payment) ──
     activeOrderId: number | null;
     activeService: ServiceRoute | null;
     setActiveOrder: (
@@ -19,10 +21,11 @@ type OrderContextType = {
         service?: ServiceRoute | null
     ) => void;
 
+    // ── Chat room ──
     activeRoomId: number | null;
     setActiveRoomId: (id: number | null) => void;
 
-    // ---- Guard global untuk boot dari notif ----
+    // ── Guard global untuk boot dari notif ──
     /** Order id yang sedang di-boot (null = tidak ada) */
     bootingOrderId: number | null;
     setBootingOrderId: (id: number | null) => void;
@@ -30,6 +33,17 @@ type OrderContextType = {
     /** Order id yang sudah selesai di-boot (untuk skip boot ulang) */
     bootedOrderId: number | null;
     setBootedOrderId: (id: number | null) => void;
+
+    // ═══════════════════════════════════════════════════════════
+    // ✅ BARU: Track order yang butuh payment (QRIS/VA)
+    // ═══════════════════════════════════════════════════════════
+    /** Order id yang sedang menunggu payment (dari OjekFlow) */
+    pendingPaymentOrderId: number | null;
+    setPendingPaymentOrderId: (id: number | null) => void;
+
+    /** Flag: boot dari payment screen (bukan dari notif) */
+    bootingFromPayment: boolean;
+    setBootingFromPayment: (v: boolean) => void;
 };
 
 const OrderContext = createContext<OrderContextType>({
@@ -42,6 +56,10 @@ const OrderContext = createContext<OrderContextType>({
     setBootingOrderId: () => { },
     bootedOrderId: null,
     setBootedOrderId: () => { },
+    pendingPaymentOrderId: null,
+    setPendingPaymentOrderId: () => { },
+    bootingFromPayment: false,
+    setBootingFromPayment: () => { },
 });
 
 export const useOrder = () => useContext(OrderContext);
@@ -56,6 +74,12 @@ export function OrderProvider({ children }: { children: ReactNode }) {
     // Guard global
     const [bootingOrderId, setBootingOrderId] = useState<number | null>(null);
     const [bootedOrderId, setBootedOrderId] = useState<number | null>(null);
+
+    // ✅ Baru
+    const [pendingPaymentOrderId, setPendingPaymentOrderId] = useState<
+        number | null
+    >(null);
+    const [bootingFromPayment, setBootingFromPayment] = useState(false);
 
     const setActiveOrder = (
         orderId: number | null,
@@ -77,6 +101,10 @@ export function OrderProvider({ children }: { children: ReactNode }) {
                 setBootingOrderId,
                 bootedOrderId,
                 setBootedOrderId,
+                pendingPaymentOrderId,
+                setPendingPaymentOrderId,
+                bootingFromPayment,
+                setBootingFromPayment,
             }}
         >
             {children}

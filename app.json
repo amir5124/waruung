@@ -9,7 +9,7 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/images/splash-icon.png",
+      "image": "./assets/images/app-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
@@ -24,7 +24,7 @@
       "package": "com.waruung.app",
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "foregroundImage": "./assets/images/app-icon.png",
         "backgroundColor": "#40a3ea"
       },
       "edgeToEdgeEnabled": true,
@@ -63,10 +63,20 @@
         {
           "icon": "./assets/images/app-icon.png",
           "color": "#40a3ea",
-          "defaultChannel": "default",
+          "defaultChannel": "customer-notif-v2",
           "sounds": [
-            "./assets/sounds/notification.mp3"
-          ]
+            "./assets/sounds/customer.mp3"
+          ],
+          "androidMode": "default",
+          "androidCollapsedTitle": "Waruung"
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Izinkan Waruung mengakses foto untuk menyimpan QRIS.",
+          "savePhotosPermission": "Izinkan Waruung menyimpan QRIS ke galeri.",
+          "isAccessMediaLocationEnabled": false
         }
       ]
     ],

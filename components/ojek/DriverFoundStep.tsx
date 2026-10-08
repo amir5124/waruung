@@ -39,7 +39,8 @@ export type Driver = {
 
 type Props = {
     payload: OrderPayload;
-    driver: Driver;
+    driver: Driver; // driver.coords diperbarui realtime oleh OjekFlow (polling)
+    status?: string; // status order dari backend: 'accepted' | 'arrived'
     onBack: () => void;
     onCancel: () => void;
     onArrived?: () => void;
@@ -55,10 +56,12 @@ const VEHICLE_IMG: Record<string, any> = {
 };
 const MARKER_ORIGIN = require('@/assets/images/marker-origin.png');
 
-// Durasi animasi pindah posisi marker (ms)
-const MARKER_ANIM_MS = 800;
-// Jarak minimum (meter) supaya route di-refresh ulang
+// Sedikit lebih pendek dari POLL_INTERVAL (3000 ms) di OjekFlow
+const MARKER_ANIM_MS = 2800;
+// Jarak minimum (meter) supaya rute di-refresh ulang
 const REFETCH_ROUTE_METERS = 100;
+// Fallback "sampai" berdasarkan jarak jika status backend belum 'arrived'
+const ARRIVE_METERS = 30;
 
 type LatLng = { latitude: number; longitude: number };
 
@@ -76,6 +79,27 @@ function distanceMeters(a: LatLng, b: LatLng): number {
         Math.cos(toRad(b.latitude)) *
         Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+function remainingDistance(polyline: LatLng[], fromIdx: number): number {
+    let total = 0;
+    for (let i = fromIdx; i < polyline.length - 1; i++) {
+        total += distanceMeters(polyline[i], polyline[i + 1]);
+    }
+    return total;
+}
+
+function nearestIndex(polyline: LatLng[], pos: LatLng): number {
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < polyline.length; i++) {
+        const d = distanceMeters(pos, polyline[i]);
+        if (d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    return best;
 }
 
 function RouteDot({ type }: { type: 'origin' | 'destination' }) {
@@ -119,6 +143,7 @@ function Avatar({ name, uri }: { name: string; uri?: string }) {
 export default function DriverFoundStep({
     payload,
     driver,
+    status,
     onBack,
     onCancel,
     onArrived,
@@ -129,6 +154,8 @@ export default function DriverFoundStep({
     const mapRef = useRef<MapView>(null);
 
     const SHEET_H = 430 + insets.bottom;
+
+    const driverPos: LatLng = driver.coords;
 
     const [route, setRoute] = useState<RouteInfo | null>(null);
     const [trackView, setTrackView] = useState(true);
@@ -151,10 +178,7 @@ export default function DriverFoundStep({
 
     useEffect(() => {
         const prev = lastFetchRef.current;
-        if (
-            prev &&
-            distanceMeters(prev, driver.coords) < REFETCH_ROUTE_METERS
-        ) {
+        if (prev && distanceMeters(prev, driver.coords) < REFETCH_ROUTE_METERS) {
             return;
         }
 
@@ -177,12 +201,22 @@ export default function DriverFoundStep({
         payload.origin.coords.longitude,
     ]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const polyline = useMemo(
+    const polyline = useMemo<LatLng[]>(
         () =>
             route?.polyline?.length
                 ? route.polyline
                 : [driver.coords, payload.origin.coords],
-        [route, driver.coords, payload.origin.coords]
+        [route, driver.coords.latitude, driver.coords.longitude, payload.origin.coords] // eslint-disable-line react-hooks/exhaustive-deps
+    );
+
+    // ---- Posisi driver pada polyline: bagian yang sudah dilewati dipangkas ----
+    const idx = useMemo(
+        () => nearestIndex(polyline, driverPos),
+        [polyline, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
+    );
+    const ahead = useMemo(
+        () => [driverPos, ...polyline.slice(idx + 1)],
+        [polyline, idx, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
     );
 
     // ---- AnimatedRegion untuk marker driver (smooth) ----
@@ -207,11 +241,7 @@ export default function DriverFoundStep({
                 useNativeDriver: false,
             } as any)
             .start();
-    }, [
-        driver.coords.latitude,
-        driver.coords.longitude,
-        driverCoord,
-    ]);
+    }, [driver.coords.latitude, driver.coords.longitude, driverCoord]);
 
     // ---- Matikan trackView setelah 500 ms (biar marker ringan) ----
     useEffect(() => {
@@ -238,11 +268,13 @@ export default function DriverFoundStep({
         }
     }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ---- Status "sampai" ----
-    // ⚠️ Karena Ojek tidak punya status backend 'arrived', kita pakai jarak.
-    // Kalau nanti backend Ojek punya status 'arrived', ubah ke `driverStatus === 'arrived'`.
-    const distToPickup = distanceMeters(driver.coords, payload.origin.coords);
-    const arrived = distToPickup <= 50; // 50m
+    // ---- Sisa jarak & ETA dari posisi driver ----
+    const remainingMeters =
+        distanceMeters(driverPos, polyline[idx]) + remainingDistance(polyline, idx);
+    const distToPickup = distanceMeters(driverPos, payload.origin.coords);
+
+    // ---- Status "sampai": utamakan status backend, jarak sebagai cadangan ----
+    const arrived = status === 'arrived' || distToPickup <= ARRIVE_METERS;
 
     useEffect(() => {
         if (arrived && !arrivedFiredRef.current) {
@@ -251,8 +283,11 @@ export default function DriverFoundStep({
         }
     }, [arrived]);
 
-    // ---- ETA dari route ----
-    const remainSec = route?.durationSec ?? 300;
+    const routeMeters = route?.distanceMeters ?? 0;
+    const remainSec =
+        route?.durationSec && routeMeters > 0
+            ? route.durationSec * Math.min(1, remainingMeters / routeMeters)
+            : 300;
     const minutes = Math.max(1, Math.ceil(remainSec / 60));
 
     const call = () =>
@@ -278,21 +313,25 @@ export default function DriverFoundStep({
                     longitudeDelta: 0.03,
                 }}
             >
-                {/* Polyline aktif (driver -> pickup) */}
-                <Polyline
-                    coordinates={polyline}
-                    strokeColor="#ffffff"
-                    strokeWidth={9}
-                    lineCap="round"
-                    lineJoin="round"
-                />
-                <Polyline
-                    coordinates={polyline}
-                    strokeColor={colors.primary}
-                    strokeWidth={5}
-                    lineCap="round"
-                    lineJoin="round"
-                />
+                {/* Polyline aktif (driver -> pickup), memendek mengikuti driver */}
+                {ahead.length > 1 && (
+                    <>
+                        <Polyline
+                            coordinates={ahead}
+                            strokeColor="#ffffff"
+                            strokeWidth={9}
+                            lineCap="round"
+                            lineJoin="round"
+                        />
+                        <Polyline
+                            coordinates={ahead}
+                            strokeColor={colors.primary}
+                            strokeWidth={5}
+                            lineCap="round"
+                            lineJoin="round"
+                        />
+                    </>
+                )}
 
                 {/* Marker titik jemput */}
                 <Marker
@@ -304,7 +343,7 @@ export default function DriverFoundStep({
                     zIndex={1}
                 />
 
-                {/* Marker driver — DINAMIS dari driver.coords */}
+                {/* Marker driver — DINAMIS dari driver.coords (realtime) */}
                 <MarkerAnimated
                     coordinate={driverCoord}
                     anchor={{ x: 0.5, y: 0.5 }}

@@ -17,6 +17,7 @@ import BannerCarousel from '../../components/BannerCarousel';
 import GradientBackground from '../../components/GradientBackground';
 import LoadingModal from '../../components/LoadingModal';
 import PromoCard from '../../components/PromoCard';
+import SaldoCard from '../../components/SaldoCard';
 import ServiceMenuItem from '../../components/ServiceMenuItem';
 
 const BANNERS = [require('../../assets/images/banner-1.png')];
@@ -180,6 +181,18 @@ export default function HomeScreen() {
 
           {/* Banner */}
           <BannerCarousel images={BANNERS} />
+
+          <SaldoCard
+            balance={3288000}
+            coins={0}
+            badgeCount={8}
+            onPressAdd={() => router.push('/topup' as any)}
+            onPressTopup={() => router.push('/topup' as any)}
+            onPressHistory={() => router.push('/riwayat' as any)}
+            onPressMore={() => router.push('/lainnya' as any)}
+          />
+
+
 
           {/* Layanan */}
           <View style={styles.serviceRow}>

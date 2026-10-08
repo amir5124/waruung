@@ -103,6 +103,10 @@ export interface CreateOrderPayload {
     distance_km: number;
     duration_min?: number;
     payment_method?: 'cash' | 'wallet' | 'qris' | 'bank_transfer';
+    bank_code?: string;                                              // ⬅️ TAMBAH
+    // ewallet_code?: 'OVO' | 'DANA' | 'LINKAJA' | 'GOPAY' | 'SHOPEEPAY'; 
+
+
     notes?: string;
     merchant_id?: string;
     tariff_code?: string;
@@ -585,6 +589,77 @@ export const api = {
 
         getMyProfile: () =>
             request<any>('/api/drivers/profile', { auth: true }),
+    },
+
+    // ===== Wallet (topup via LinkQu) =====
+    wallet: {
+        /** Saldo customer */
+        get: () =>
+            request<{
+                balance: number;
+                pending_balance: number;
+                net_balance: number;
+                updated_at: string;
+            }>('/api/wallet', { auth: true }),
+
+        /** Riwayat transaksi wallet customer (wallet_transactions) */
+        ledger: (limit = 50, offset = 0) =>
+            request<
+                Array<{
+                    id: number;
+                    user_id: string;
+                    type: string;
+                    amount: number;
+                    balance_after: number;
+                    reference_id: string | null;
+                    description: string | null;
+                    created_at: string;
+                }>
+            >(`/api/wallet/ledger?limit=${limit}&offset=${offset}`, { auth: true }),
+
+        /** Topup: buat VA / QRIS */
+        topupInquiry: (input: {
+            amount: number;
+            method: 'va' | 'qris';
+            bank_code?: string;
+        }) =>
+            request<{
+                partner_reff: string;
+                virtual_account?: string;
+                imageqris?: string;
+                expired?: string;
+                [key: string]: any;
+            }>('/api/wallet/topup/inquiry', {
+                method: 'POST',
+                body: input,
+                auth: true,
+            }),
+
+        /** Topup: cek status ke LinkQu (dipakai polling) */
+        topupExecute: (partnerReff: string) =>
+            request<any>('/api/wallet/topup/execute', {
+                method: 'POST',
+                body: { partner_reff: partnerReff },
+                auth: true,
+            }),
+
+        /** Topup: status dari database */
+        topupStatus: (partnerReff: string) =>
+            request<{
+                id: number;
+                user_id: string;
+                partner_reff: string;
+                method: 'va' | 'qris';
+                amount: number;      // total bayar
+                nominal: number;     // masuk saldo
+                admin_fee: number;
+                bank_code: string | null;
+                va_number: string | null;
+                qris_url: string | null;
+                status: 'PENDING' | 'SUCCESS' | 'FAILED';
+                expired_at: string | null;
+                created_at: string;
+            }>(`/api/wallet/topup/status/${partnerReff}`, { auth: true }),
     },
 
     // ===== Activity (notifikasi pintar) =====

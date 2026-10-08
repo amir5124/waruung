@@ -27,6 +27,7 @@ export type RouteInfo = {
     isEstimate?: boolean;
 };
 
+// types/ojek.ts
 export type OrderPayload = {
     service: ServiceType;
     optionId: string;
@@ -36,4 +37,6 @@ export type OrderPayload = {
     destination: PlaceLoc;
     distanceMeters: number;
     durationSec: number;
+    payment_method?: 'cash' | 'wallet' | 'qris' | 'bank_transfer';  // ✅
+    bank_code?: string;                                              // ✅
 };

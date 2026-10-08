@@ -1,7 +1,8 @@
+// components/order/OrderStep.tsx
 import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
 import { useTariffs } from '@/hooks/use-tariffs';
-import { Tariff } from '@/lib/api';
+import { api, Tariff } from '@/lib/api';
 import { trackQuote } from '@/lib/behaviorTracker';
 import { getRoute } from '@/services/google-maps';
 import type { OrderPayload, PlaceLoc, RouteInfo, ServiceType } from '@/types/ojek';
@@ -9,15 +10,22 @@ import { AntDesign, Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    Alert,
     Image,
+    Modal,
     Pressable,
     ScrollView,
     StyleSheet,
     Text,
+    TouchableOpacity,
     useWindowDimensions,
-    View,
+    View
 } from 'react-native';
-import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import {
+    Gesture,
+    GestureDetector,
+    GestureHandlerRootView,
+} from 'react-native-gesture-handler';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import Animated, {
     FadeInUp,
@@ -29,6 +37,9 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CircleButton, MAP_PROVIDER } from './parts';
 
+// ============================================================
+// TYPES
+// ============================================================
 type Props = {
     serviceType: ServiceType;
     origin: PlaceLoc;
@@ -44,6 +55,11 @@ type Props = {
     onBusinessPress?: () => void;
 };
 
+type PaymentMethod = 'cash' | 'wallet' | 'qris' | 'bank_transfer';
+
+// ============================================================
+// CONSTANTS
+// ============================================================
 const VEHICLE_IMG = {
     motor: require('@/assets/images/motor.png'),
     mobil: require('@/assets/images/mobil.png'),
@@ -57,9 +73,21 @@ const MARKER_IMG = {
 const ORANGE = '#f26b21';
 const CYAN = '#12a8d8';
 const CORAL = '#ee6c6c';
+const PURPLE = '#8B5CF6';
+const GREEN = '#16A34A';
 
-const DUMMY_SALDO = 50000;
+const BANKS = [
+    { code: 'BRI', label: 'BRI', short: 'BRI', color: '#00529C' },
+    { code: 'BNI', label: 'BNI', short: 'BNI', color: '#F15A23' },
+    { code: 'MANDIRI', label: 'Mandiri', short: 'MDR', color: '#003D79' },
+    { code: 'BCA', label: 'BCA', short: 'BCA', color: '#0060AF' },
+    { code: 'PERMATA', label: 'Permata', short: 'PMT', color: '#6CB33F' },
+    { code: 'CIMB', label: 'CIMB Niaga', short: 'CIMB', color: '#EC1C24' },
+];
 
+// ============================================================
+// HELPERS
+// ============================================================
 function isValidCoords(c: any): boolean {
     return (
         c &&
@@ -71,6 +99,48 @@ function isValidCoords(c: any): boolean {
     );
 }
 
+function getPaymentLabel(method: PaymentMethod, bankLabel?: string): string {
+    switch (method) {
+        case 'cash':
+            return 'Tunai';
+        case 'wallet':
+            return 'Saldo Waruung';
+        case 'qris':
+            return 'QRIS';
+        case 'bank_transfer':
+            return bankLabel ? `VA ${bankLabel}` : 'Transfer Bank';
+    }
+}
+
+function getPaymentIcon(method: PaymentMethod): keyof typeof Ionicons.glyphMap {
+    switch (method) {
+        case 'cash':
+            return 'cash-outline';
+        case 'wallet':
+            return 'wallet';
+        case 'qris':
+            return 'qr-code-outline';
+        case 'bank_transfer':
+            return 'card-outline';
+    }
+}
+
+function getPaymentColor(method: PaymentMethod): string {
+    switch (method) {
+        case 'cash':
+            return GREEN;
+        case 'wallet':
+            return CYAN;
+        case 'qris':
+            return ORANGE;
+        case 'bank_transfer':
+            return PURPLE;
+    }
+}
+
+// ============================================================
+// SUB-COMPONENTS
+// ============================================================
 function RouteDot({ type }: { type: 'origin' | 'destination' }) {
     if (type === 'origin') {
         return (
@@ -83,6 +153,51 @@ function RouteDot({ type }: { type: 'origin' | 'destination' }) {
         <View style={[s.routeDot, { backgroundColor: ORANGE }]}>
             <View style={s.routeDotInner} />
         </View>
+    );
+}
+
+function PaymentOption({
+    icon,
+    color,
+    title,
+    subtitle,
+    selected,
+    disabled,
+    onPress,
+}: {
+    icon: keyof typeof Ionicons.glyphMap;
+    color: string;
+    title: string;
+    subtitle?: string;
+    selected: boolean;
+    disabled?: boolean;
+    onPress: () => void;
+}) {
+    return (
+        <Pressable
+            onPress={onPress}
+            style={[
+                s.payOpt,
+                selected && {
+                    borderColor: colors.primary,
+                    backgroundColor: colors.primarySoft,
+                },
+                disabled && { opacity: 0.5 },
+            ]}
+        >
+            <View style={[s.payOptIcon, { backgroundColor: color }]}>
+                <Ionicons name={icon} size={20} color="#fff" />
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={s.payOptTitle}>{title}</Text>
+                {!!subtitle && <Text style={s.payOptSub}>{subtitle}</Text>}
+            </View>
+            <View
+                style={[s.radio, selected && { borderColor: colors.primary }]}
+            >
+                {selected && <View style={s.radioInner} />}
+            </View>
+        </Pressable>
     );
 }
 
@@ -102,9 +217,19 @@ function OptionRow({
     onPress: () => void;
 }) {
     return (
-        <Pressable onPress={onPress} style={[s.option, selected && { backgroundColor: colors.primarySoft }]}>
+        <Pressable
+            onPress={onPress}
+            style={[
+                s.option,
+                selected && { backgroundColor: colors.primarySoft },
+            ]}
+        >
             <View style={s.optionIcon}>
-                <Image source={VEHICLE_IMG[service]} style={{ width: 52, height: 52 }} resizeMode="contain" />
+                <Image
+                    source={VEHICLE_IMG[service]}
+                    style={{ width: 52, height: 52 }}
+                    resizeMode="contain"
+                />
             </View>
             <View style={{ flex: 1 }}>
                 <View style={s.nameRow}>
@@ -115,8 +240,14 @@ function OptionRow({
                 <View style={s.meta}>
                     <Text style={s.eta}>{option.eta_min} mnt</Text>
                     <View style={s.dot} />
-                    <Ionicons name="person" size={12} color={colors.textMuted} />
-                    <Text style={s.metaText}>{option.capacity} penumpang</Text>
+                    <Ionicons
+                        name="person"
+                        size={12}
+                        color={colors.textMuted}
+                    />
+                    <Text style={s.metaText}>
+                        {option.capacity} penumpang
+                    </Text>
                 </View>
                 {!!option.desc_text && (
                     <Text style={s.optionDesc}>{option.desc_text}</Text>
@@ -131,7 +262,9 @@ function OptionRow({
         </Pressable>
     );
 }
-
+// ============================================================
+// MAIN COMPONENT
+// ============================================================
 export default function OrderStep({
     serviceType,
     origin,
@@ -158,15 +291,38 @@ export default function OrderStep({
     const [routeError, setRouteError] = useState(false);
     const [selectedId, setSelectedId] = useState<string | null>(null);
 
+    // ============================================================
+    // ✅ PAYMENT STATE
+    // ============================================================
+    const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
+    const [bankCode, setBankCode] = useState<string | null>(null);
+    const [selectedBankLabel, setSelectedBankLabel] = useState<string>('');
+    const [showPaymentModal, setShowPaymentModal] = useState(false);
+    const [showBankModal, setShowBankModal] = useState(false);
+    const [customerBalance, setCustomerBalance] = useState<number>(0);
+
     // ---- Tarif dari backend ----
     const { tariffs, loading: tariffsLoading, calcPrice } = useTariffs(service);
 
-    // Auto-pilih opsi pertama saat tariffs siap
     useEffect(() => {
         if (!selectedId && tariffs.length > 0) {
             setSelectedId(tariffs[0].code);
         }
     }, [tariffs, selectedId]);
+
+    // ============================================================
+    // ✅ FETCH SALDO CUSTOMER
+    // ============================================================
+    useEffect(() => {
+        (async () => {
+            try {
+                const wallet = await api.wallet.get();
+                setCustomerBalance(Number(wallet.balance ?? 0));
+            } catch (err) {
+                console.warn('[OrderStep] Gagal load saldo:', err);
+            }
+        })();
+    }, []);
 
     const coordsValid =
         isValidCoords(origin?.coords) && isValidCoords(destination?.coords);
@@ -193,7 +349,10 @@ export default function OrderStep({
             startH.value = sheetH.value;
         })
         .onUpdate((e) => {
-            sheetH.value = Math.min(EXPANDED, Math.max(COLLAPSED, startH.value - e.translationY));
+            sheetH.value = Math.min(
+                EXPANDED,
+                Math.max(COLLAPSED, startH.value - e.translationY)
+            );
         })
         .onEnd((e) => {
             const target =
@@ -207,7 +366,10 @@ export default function OrderStep({
             sheetH.value = withSpring(target, SPRING);
         });
     const tap = Gesture.Tap().onEnd(() => {
-        sheetH.value = withSpring(sheetH.value > MID ? COLLAPSED : EXPANDED, SPRING);
+        sheetH.value = withSpring(
+            sheetH.value > MID ? COLLAPSED : EXPANDED,
+            SPRING
+        );
     });
 
     const sheetStyle = useAnimatedStyle(() => ({ height: sheetH.value }));
@@ -252,13 +414,17 @@ export default function OrderStep({
     }, [origin.coords, destination.coords, coordsValid]);
 
     const fit = () => {
-        const pts =
-            route?.polyline?.length
-                ? route.polyline
-                : [origin.coords, destination.coords].filter(isValidCoords);
+        const pts = route?.polyline?.length
+            ? route.polyline
+            : [origin.coords, destination.coords].filter(isValidCoords);
         if (pts.length < 1) return;
         mapRef.current?.fitToCoordinates(pts as any, {
-            edgePadding: { top: insets.top + 130, bottom: EXPANDED + 70, left: 60, right: 60 },
+            edgePadding: {
+                top: insets.top + 130,
+                bottom: EXPANDED + 70,
+                left: 60,
+                right: 60,
+            },
             animated: true,
         });
     };
@@ -272,17 +438,12 @@ export default function OrderStep({
         return tariffs.find((o) => o.code === selectedId) ?? tariffs[0];
     }, [tariffs, selectedId]);
 
-    const priceOf = (t: Tariff) => calcPrice(t.code, route?.distanceMeters ?? 0);
+    const priceOf = (t: Tariff) =>
+        calcPrice(t.code, route?.distanceMeters ?? 0);
 
     const currentPrice = selected ? priceOf(selected) : 0;
 
-    // ============================================================
-    // Track quote untuk notifikasi "abandoned quote"
-    // OrderStep ini khusus ride (motor & mobil).
-    // WarSend & WarFood punya OrderStep sendiri.
-    // Ter-trigger tiap: harga tampil, user ganti armada, rute berubah.
-    // Di-debounce 1.5 detik di dalam trackQuote() — aman dari spam.
-    // ============================================================
+    // ---- Track quote ----
     useEffect(() => {
         if (!origin || !destination) return;
         if (!selected) return;
@@ -305,7 +466,7 @@ export default function OrderStep({
                     longitude: destination.coords.longitude,
                 },
             },
-            optionName: selected.label,        // 'WarJek' / 'WarCar'
+            optionName: selected.label,
             price: currentPrice,
             etaMin: selected.eta_min,
             distanceKm: route.distanceMeters / 1000,
@@ -319,8 +480,7 @@ export default function OrderStep({
         destination?.name,
     ]);
 
-    const isSaldoEnough = DUMMY_SALDO >= currentPrice;
-    const saldoText = `Saldo: ${formatRupiah(DUMMY_SALDO)}`;
+    const isSaldoEnough = customerBalance >= currentPrice;
 
     // ---- tab indicator ----
     const tabPos = useRef<Record<ServiceType, { x: number; w: number }>>({
@@ -339,7 +499,6 @@ export default function OrderStep({
 
     const switchService = (t: ServiceType) => {
         setService(t);
-        // Reset selected; akan auto-pilih lagi setelah tariffs fetch selesai
         setSelectedId(null);
         moveIndicator(t);
     };
@@ -350,8 +509,57 @@ export default function OrderStep({
     }));
 
     const canOrder =
-        coordsValid && !!route && !routeError && route.distanceMeters > 0 && !!selected;
+        coordsValid &&
+        !!route &&
+        !routeError &&
+        route.distanceMeters > 0 &&
+        !!selected;
 
+    // ============================================================
+    // HANDLE ORDER
+    // ============================================================
+    const handleOrder = () => {
+        if (!route || !selected) return;
+
+        // Validasi tambahan
+        if (paymentMethod === 'wallet' && !isSaldoEnough) {
+            Alert.alert(
+                'Saldo tidak cukup',
+                `Saldo kamu ${formatRupiah(
+                    customerBalance
+                )}, butuh ${formatRupiah(currentPrice)}`
+            );
+            return;
+        }
+
+        if (paymentMethod === 'bank_transfer' && !bankCode) {
+            Alert.alert(
+                'Bank belum dipilih',
+                'Pilih bank untuk transfer VA dulu.'
+            );
+            return;
+        }
+
+        onOrder({
+            service,
+            optionId: selected.code,
+            optionName: selected.label,
+            price: priceOf(selected),
+            origin,
+            destination,
+            distanceMeters: route.distanceMeters,
+            durationSec: route.durationSec,
+            payment_method: paymentMethod, // ✅ KIRIM
+            bank_code:
+                paymentMethod === 'bank_transfer' && bankCode
+                    ? bankCode
+                    : undefined, // ✅ KIRIM
+        });
+    };
+
+    // ============================================================
+    // RENDER
+    // ============================================================
     return (
         <GestureHandlerRootView style={{ flex: 1 }}>
             <MapView
@@ -410,7 +618,10 @@ export default function OrderStep({
             </MapView>
 
             {/* Kartu asal-tujuan */}
-            <Animated.View entering={FadeInUp.duration(300)} style={[s.routeCard, { top: insets.top + 12 }]}>
+            <Animated.View
+                entering={FadeInUp.duration(300)}
+                style={[s.routeCard, { top: insets.top + 12 }]}
+            >
                 <View style={{ flex: 1 }}>
                     <View style={s.routeRow}>
                         <RouteDot type="origin" />
@@ -433,7 +644,10 @@ export default function OrderStep({
             </Animated.View>
 
             {/* Tombol back */}
-            <Animated.View pointerEvents="box-none" style={[s.floatRow, floatStyle]}>
+            <Animated.View
+                pointerEvents="box-none"
+                style={[s.floatRow, floatStyle]}
+            >
                 <View style={s.floatBack}>
                     <CircleButton icon="arrow-back" onPress={onBack} />
                 </View>
@@ -457,31 +671,54 @@ export default function OrderStep({
                                     hitSlop={{ left: 20, right: 20 }}
                                     onPress={() => switchService(t)}
                                     onLayout={(e) => {
-                                        const { x, width } = e.nativeEvent.layout;
+                                        const { x, width } =
+                                            e.nativeEvent.layout;
                                         tabPos.current[t] = { x, w: width };
-                                        if (t === service) moveIndicator(t, false);
+                                        if (t === service)
+                                            moveIndicator(t, false);
                                     }}
                                 >
-                                    <Text style={[s.tabText, service === t && { color: colors.primary }]}>
+                                    <Text
+                                        style={[
+                                            s.tabText,
+                                            service === t && {
+                                                color: colors.primary,
+                                            },
+                                        ]}
+                                    >
                                         {t === 'motor' ? 'Motor' : 'Mobil'}
                                     </Text>
                                 </Pressable>
                             ))}
-                            <Animated.View style={[s.indicator, indicator]} />
+                            <Animated.View
+                                style={[s.indicator, indicator]}
+                            />
                         </View>
                     </View>
                 </GestureDetector>
 
-                <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+                <ScrollView
+                    style={{ flex: 1 }}
+                    showsVerticalScrollIndicator={false}
+                >
                     {tariffsLoading && (
-                        <View style={{ padding: 20, alignItems: 'center' }}>
+                        <View
+                            style={{
+                                padding: 20,
+                                alignItems: 'center',
+                            }}
+                        >
                             <ActivityIndicator color={colors.primary} />
-
                         </View>
                     )}
 
                     {!tariffsLoading && tariffs.length === 0 && (
-                        <View style={{ padding: 20, alignItems: 'center' }}>
+                        <View
+                            style={{
+                                padding: 20,
+                                alignItems: 'center',
+                            }}
+                        >
                             <Text style={{ color: colors.textMuted }}>
                                 Tarif belum tersedia untuk layanan ini.
                             </Text>
@@ -502,7 +739,12 @@ export default function OrderStep({
                         ))}
                 </ScrollView>
 
-                <View style={[s.footer, { paddingBottom: insets.bottom + 12 }]}>
+                <View
+                    style={[
+                        s.footer,
+                        { paddingBottom: insets.bottom + 12 },
+                    ]}
+                >
                     {route?.isEstimate && (
                         <Text style={s.estimate}>
                             {routeError
@@ -512,62 +754,281 @@ export default function OrderStep({
                     )}
 
                     <View style={s.payLine}>
-                        <Pressable style={{ flexShrink: 1 }}>
+                        {/* ✅ TOMBOL PAYMENT — BUKA MODAL */}
+                        <Pressable
+                            style={{ flexShrink: 1 }}
+                            onPress={() => setShowPaymentModal(true)}
+                        >
                             <View style={s.payRow}>
-                                <View style={s.payIcon}>
-                                    <Ionicons name="wallet" size={12} color="#fff" />
+                                <View
+                                    style={[
+                                        s.payIcon,
+                                        {
+                                            backgroundColor:
+                                                getPaymentColor(
+                                                    paymentMethod
+                                                ),
+                                        },
+                                    ]}
+                                >
+                                    <Ionicons
+                                        name={getPaymentIcon(paymentMethod)}
+                                        size={12}
+                                        color="#fff"
+                                    />
                                 </View>
-                                <Text style={s.payText}>{paymentLabel}</Text>
-                                <Ionicons name="chevron-forward" size={14} color={colors.text} />
+                                <Text style={s.payText}>
+                                    {getPaymentLabel(
+                                        paymentMethod,
+                                        selectedBankLabel
+                                    )}
+                                </Text>
+                                <Ionicons
+                                    name="chevron-forward"
+                                    size={14}
+                                    color={colors.text}
+                                />
                             </View>
-                            <Text style={[s.balance, { color: isSaldoEnough ? colors.primary : CORAL }]}>
-                                {saldoText}
-                            </Text>
+                            {paymentMethod === 'wallet' && (
+                                <Text
+                                    style={[
+                                        s.balance,
+                                        {
+                                            color: isSaldoEnough
+                                                ? colors.primary
+                                                : CORAL,
+                                        },
+                                    ]}
+                                >
+                                    Saldo:{' '}
+                                    {formatRupiah(customerBalance)}
+                                </Text>
+                            )}
                         </Pressable>
 
                         {!!discountLabel && (
                             <Pressable style={s.discount}>
                                 <View style={s.discountIcon}>
-                                    <Ionicons name="pricetag" size={11} color="#fff" />
+                                    <Ionicons
+                                        name="pricetag"
+                                        size={11}
+                                        color="#fff"
+                                    />
                                 </View>
-                                <Text style={s.discountText}>{discountLabel}</Text>
+                                <Text style={s.discountText}>
+                                    {discountLabel}
+                                </Text>
                             </Pressable>
                         )}
                     </View>
 
                     <Pressable
                         disabled={!canOrder || !selected}
-                        onPress={() => {
-                            if (!route || !selected) return;
-                            onOrder({
-                                service,
-                                optionId: selected.code,
-                                optionName: selected.label,
-                                price: priceOf(selected),
-                                origin,
-                                destination,
-                                distanceMeters: route.distanceMeters,
-                                durationSec: route.durationSec,
-                            });
-                        }}
-                        style={[s.cta, { opacity: canOrder && selected ? 1 : 0.6 }]}
+                        onPress={handleOrder}
+                        style={[
+                            s.cta,
+                            {
+                                opacity:
+                                    canOrder && selected ? 1 : 0.6,
+                            },
+                        ]}
                     >
                         <Text style={s.ctaText} numberOfLines={1}>
                             Cari {selected?.label ?? 'kendaraan'}
                         </Text>
                         <Text style={s.ctaPrice}>
-                            {route && selected ? formatRupiah(priceOf(selected)) : '…'}
+                            {route && selected
+                                ? formatRupiah(priceOf(selected))
+                                : '…'}
                         </Text>
                         <View style={s.ctaArrow}>
-                            <Ionicons name="arrow-forward" size={18} color={colors.primary} />
+                            <Ionicons
+                                name="arrow-forward"
+                                size={18}
+                                color={colors.primary}
+                            />
                         </View>
                     </Pressable>
                 </View>
             </Animated.View>
+
+            {/* ============================================================
+                MODAL: Pilih Metode Pembayaran
+            ============================================================ */}
+            <Modal
+                visible={showPaymentModal}
+                transparent
+                animationType="slide"
+                onRequestClose={() => setShowPaymentModal(false)}
+                statusBarTranslucent
+            >
+                <View style={s.modalOverlay}>
+                    <TouchableOpacity
+                        style={{ flex: 1 }}
+                        activeOpacity={1}
+                        onPress={() => setShowPaymentModal(false)}
+                    />
+                    <View
+                        style={[
+                            s.modalSheet,
+                            { paddingBottom: insets.bottom + 12 },
+                        ]}
+                    >
+                        <View style={s.modalHandle} />
+                        <Text style={s.modalTitle}>
+                            Pilih Metode Pembayaran
+                        </Text>
+
+                        <PaymentOption
+                            icon="cash-outline"
+                            color={GREEN}
+                            title="Tunai"
+                            subtitle="Bayar langsung ke driver"
+                            selected={paymentMethod === 'cash'}
+                            onPress={() => {
+                                setPaymentMethod('cash');
+                                setBankCode(null);
+                                setSelectedBankLabel('');
+                                setShowPaymentModal(false);
+                            }}
+                        />
+
+                        <PaymentOption
+                            icon="wallet"
+                            color={CYAN}
+                            title="Saldo Waruung"
+                            subtitle={`Saldo: ${formatRupiah(
+                                customerBalance
+                            )}`}
+                            selected={paymentMethod === 'wallet'}
+                            disabled={customerBalance < currentPrice}
+                            onPress={() => {
+                                if (customerBalance < currentPrice) {
+                                    Alert.alert(
+                                        'Saldo tidak cukup',
+                                        `Saldo kamu ${formatRupiah(
+                                            customerBalance
+                                        )}, butuh ${formatRupiah(
+                                            currentPrice
+                                        )}`
+                                    );
+                                    return;
+                                }
+                                setPaymentMethod('wallet');
+                                setBankCode(null);
+                                setSelectedBankLabel('');
+                                setShowPaymentModal(false);
+                            }}
+                        />
+
+                        <PaymentOption
+                            icon="qr-code-outline"
+                            color={ORANGE}
+                            title="QRIS"
+                            subtitle="Scan QRIS via LinkQu"
+                            selected={paymentMethod === 'qris'}
+                            onPress={() => {
+                                setPaymentMethod('qris');
+                                setBankCode(null);
+                                setSelectedBankLabel('');
+                                setShowPaymentModal(false);
+                            }}
+                        />
+
+                        <PaymentOption
+                            icon="card-outline"
+                            color={PURPLE}
+                            title="Transfer Bank (VA)"
+                            subtitle={
+                                bankCode
+                                    ? `VA ${selectedBankLabel}`
+                                    : 'BRI, BNI, Mandiri, BCA, dll'
+                            }
+                            selected={paymentMethod === 'bank_transfer'}
+                            onPress={() => {
+                                setPaymentMethod('bank_transfer');
+                                setShowPaymentModal(false);
+                                setShowBankModal(true);
+                            }}
+                        />
+                    </View>
+                </View>
+            </Modal>
+
+            {/* ============================================================
+                MODAL: Pilih Bank (untuk VA)
+            ============================================================ */}
+            <Modal
+                visible={showBankModal}
+                transparent
+                animationType="slide"
+                onRequestClose={() => setShowBankModal(false)}
+                statusBarTranslucent
+            >
+                <View style={s.modalOverlay}>
+                    <TouchableOpacity
+                        style={{ flex: 1 }}
+                        activeOpacity={1}
+                        onPress={() => setShowBankModal(false)}
+                    />
+                    <View
+                        style={[
+                            s.modalSheet,
+                            { paddingBottom: insets.bottom + 12 },
+                        ]}
+                    >
+                        <View style={s.modalHandle} />
+                        <Text style={s.modalTitle}>Pilih Bank</Text>
+                        <ScrollView style={{ maxHeight: 400 }}>
+                            {BANKS.map((b, i) => (
+                                <Pressable
+                                    key={b.code}
+                                    onPress={() => {
+                                        setBankCode(b.code);
+                                        setSelectedBankLabel(b.label);
+                                        setShowBankModal(false);
+                                    }}
+                                    style={[
+                                        s.bankRow,
+                                        i < BANKS.length - 1 &&
+                                        s.bankRowBorder,
+                                        bankCode === b.code &&
+                                        s.bankRowActive,
+                                    ]}
+                                >
+                                    <View
+                                        style={[
+                                            s.bankBadge,
+                                            { backgroundColor: b.color },
+                                        ]}
+                                    >
+                                        <Text style={s.bankBadgeText}>
+                                            {b.short}
+                                        </Text>
+                                    </View>
+                                    <Text style={s.bankLabel}>
+                                        {b.label}
+                                    </Text>
+                                    {bankCode === b.code && (
+                                        <Ionicons
+                                            name="checkmark-circle"
+                                            size={22}
+                                            color={colors.primary}
+                                        />
+                                    )}
+                                </Pressable>
+                            ))}
+                        </ScrollView>
+                    </View>
+                </View>
+            </Modal>
         </GestureHandlerRootView>
     );
 }
 
+// ============================================================
+// STYLES
+// ============================================================
 const s = StyleSheet.create({
     routeCard: {
         position: 'absolute',
@@ -586,11 +1047,36 @@ const s = StyleSheet.create({
         shadowRadius: 8,
         shadowOffset: { width: 0, height: 3 },
     },
-    routeRow: { flexDirection: 'row', alignItems: 'center', gap: 12, height: 36 },
-    routeText: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.text },
-    routeDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginLeft: 36 },
-    routeDot: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-    routeDotInner: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#fff' },
+    routeRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        height: 36,
+    },
+    routeText: {
+        flex: 1,
+        fontSize: 15,
+        fontWeight: '600',
+        color: colors.text,
+    },
+    routeDivider: {
+        height: StyleSheet.hairlineWidth,
+        backgroundColor: colors.border,
+        marginLeft: 36,
+    },
+    routeDot: {
+        width: 24,
+        height: 24,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    routeDotInner: {
+        width: 9,
+        height: 9,
+        borderRadius: 5,
+        backgroundColor: '#fff',
+    },
     addBtn: {
         flexDirection: 'row',
         alignItems: 'center',
@@ -614,7 +1100,13 @@ const s = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
-    floatBack: { position: 'absolute', left: 0, top: 0, bottom: 0, justifyContent: 'center' },
+    floatBack: {
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        bottom: 0,
+        justifyContent: 'center',
+    },
 
     sheet: {
         position: 'absolute',
@@ -630,11 +1122,20 @@ const s = StyleSheet.create({
         shadowRadius: 10,
     },
     handleArea: { alignItems: 'center', paddingTop: 10, paddingBottom: 6 },
-    handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: '#c9ccd1' },
+    handle: {
+        width: 40,
+        height: 4,
+        borderRadius: 2,
+        backgroundColor: '#c9ccd1',
+    },
 
     tabs: { flexDirection: 'row', justifyContent: 'center', gap: 40 },
     tab: { paddingVertical: 10 },
-    tabText: { fontSize: 16, fontWeight: '700', color: colors.textMuted },
+    tabText: {
+        fontSize: 16,
+        fontWeight: '700',
+        color: colors.textMuted,
+    },
     indicator: {
         position: 'absolute',
         left: 0,
@@ -653,11 +1154,26 @@ const s = StyleSheet.create({
     },
     optionIcon: { width: 56, alignItems: 'center' },
     nameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-    optionName: { flexShrink: 1, fontSize: 17, fontWeight: '800', color: colors.text },
-    meta: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 },
+    optionName: {
+        flexShrink: 1,
+        fontSize: 17,
+        fontWeight: '800',
+        color: colors.text,
+    },
+    meta: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        marginTop: 3,
+    },
     eta: { color: colors.text, fontSize: 13, fontWeight: '700' },
     metaText: { color: colors.textMuted, fontSize: 13 },
-    dot: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#c4c8cf' },
+    dot: {
+        width: 4,
+        height: 4,
+        borderRadius: 2,
+        backgroundColor: '#c4c8cf',
+    },
     optionDesc: { color: colors.textMuted, marginTop: 3, fontSize: 13 },
     price: { fontSize: 17, fontWeight: '700', color: colors.text },
     separator: {
@@ -679,7 +1195,11 @@ const s = StyleSheet.create({
     },
     estimate: { fontSize: 12, color: colors.secondary },
 
-    payLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    payLine: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+    },
     payRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
     payIcon: {
         width: 20,
@@ -729,7 +1249,12 @@ const s = StyleSheet.create({
         gap: 8,
     },
     ctaText: { flex: 1, color: '#fff', fontWeight: '800', fontSize: 16 },
-    ctaPrice: { color: '#fff', fontWeight: '800', fontSize: 16, marginRight: 4 },
+    ctaPrice: {
+        color: '#fff',
+        fontWeight: '800',
+        fontSize: 16,
+        marginRight: 4,
+    },
     ctaArrow: {
         width: 36,
         height: 36,
@@ -737,5 +1262,113 @@ const s = StyleSheet.create({
         backgroundColor: '#fff',
         alignItems: 'center',
         justifyContent: 'center',
+    },
+
+    // ===== Modal =====
+    modalOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(17,24,39,0.5)',
+        justifyContent: 'flex-end',
+    },
+    modalSheet: {
+        backgroundColor: '#fff',
+        borderTopLeftRadius: 24,
+        borderTopRightRadius: 24,
+        paddingHorizontal: 20,
+        paddingTop: 10,
+    },
+    modalHandle: {
+        alignSelf: 'center',
+        width: 40,
+        height: 4,
+        borderRadius: 2,
+        backgroundColor: '#E5E7EB',
+        marginBottom: 14,
+    },
+    modalTitle: {
+        fontSize: 18,
+        fontWeight: '800',
+        color: colors.text,
+        marginBottom: 14,
+    },
+
+    // ===== Payment option =====
+    payOpt: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        padding: 14,
+        borderRadius: 14,
+        borderWidth: 1.5,
+        borderColor: colors.border,
+        backgroundColor: '#fff',
+        marginBottom: 10,
+    },
+    payOptIcon: {
+        width: 40,
+        height: 40,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    payOptTitle: {
+        fontSize: 15,
+        fontWeight: '800',
+        color: colors.text,
+    },
+    payOptSub: {
+        fontSize: 12,
+        color: colors.textMuted,
+        marginTop: 2,
+    },
+    radio: {
+        width: 22,
+        height: 22,
+        borderRadius: 11,
+        borderWidth: 2,
+        borderColor: '#D1D5DB',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    radioInner: {
+        width: 11,
+        height: 11,
+        borderRadius: 6,
+        backgroundColor: colors.primary,
+    },
+
+    // ===== Bank row =====
+    bankRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 14,
+        paddingHorizontal: 4,
+    },
+    bankRowBorder: {
+        borderBottomWidth: 1,
+        borderBottomColor: colors.border,
+    },
+    bankRowActive: {
+        backgroundColor: colors.primarySoft,
+        borderRadius: 12,
+        paddingHorizontal: 12,
+    },
+    bankBadge: {
+        width: 40,
+        height: 40,
+        borderRadius: 14,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    bankBadgeText: {
+        color: '#fff',
+        fontSize: 12,
+        fontWeight: '800',
+    },
+    bankLabel: {
+        flex: 1,
+        marginLeft: 14,
+        fontSize: 15,
+        fontWeight: '700',
+        color: colors.text,
     },
 });
