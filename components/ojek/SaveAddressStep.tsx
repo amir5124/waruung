@@ -1,4 +1,5 @@
 import AppAlert from '@/components/AppAlert';
+import { mapStyle } from '@/constants/ojek-map-style';
 import { colors, MAP_DELTA } from '@/constants/ojek-theme';
 import { reverseGeocode } from '@/services/google-maps';
 import type { Coords, PlaceLoc } from '@/types/ojek';
@@ -362,6 +363,7 @@ export default function SaveAddressStep({
                 <MapView
                     ref={mapRef}
                     style={StyleSheet.absoluteFill}
+                    customMapStyle={mapStyle}
                     provider={MAP_PROVIDER}
                     initialRegion={{
                         ...targetCoords,

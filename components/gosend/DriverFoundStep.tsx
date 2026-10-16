@@ -1,9 +1,11 @@
+import { mapStyle } from '@/constants/ojek-map-style';
 import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
 import { getRoute } from '@/services/google-maps';
 import type {
     ContactInfo,
     DriverInfo,
+    DriverStatus,
     GoSendCourierOption,
     PackageInfo,
     PlaceLoc,
@@ -31,6 +33,9 @@ import Animated, { FadeInUp } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CircleButton, MAP_PROVIDER } from '../ojek/parts';
 
+// Re-export agar import lama `from './DriverFoundStep'` tetap jalan
+export type { DriverStatus };
+
 /** Data order WarSend (sama dengan payload yang dikirim saat booking) */
 export type GoSendOrder = {
     origin: PlaceLoc;
@@ -41,58 +46,46 @@ export type GoSendOrder = {
     receiver: ContactInfo | null;
 };
 
-/**
- * Status driver dari backend.
- * - 'searching'  : backend belum menemukan driver (marker disembunyikan)
- * - 'pending'    : driver sudah ditugaskan tapi belum accept -> marker diam
- * - 'accepted'   : driver sudah accept, menuju pickup -> marker bergerak
- * - 'arrived'    : driver sudah sampai di titik jemput
- */
-export type DriverStatus = 'searching' | 'pending' | 'accepted' | 'arrived';
-
 type Props = {
     order: GoSendOrder;
-    /**
-     * Data driver dari API.
-     * - `driver.coords` di-update parent secara live (polling / realtime).
-     */
+    /** driver.coords di-update parent secara live (polling) */
     driver: DriverInfo;
-    /** Status driver dari backend. Kalau tidak dikirim, default 'accepted'. */
+    /** Status dari backend. Default 'accepted'. */
     status?: DriverStatus;
-    /** Kode keamanan dari backend. Hanya ditampilkan kalau order.packageInfo.receiveCode = true */
+    /** Hanya ditampilkan kalau order.packageInfo.receiveCode = true */
     securityCode?: string | null;
     onBack: () => void;
     onCall: () => void;
     onChat: () => void;
     /** Kalau diisi, tombol "Batalkan pesanan" ditampilkan */
     onCancel?: () => void;
-    /** Dipanggil sekali saat status backend berubah jadi 'arrived' */
+    /** Dipanggil sekali saat status backend menjadi 'arrived' */
     onArrived?: () => void;
 };
 
 const ORANGE = '#f26b21';
 
-/**
- * Mapping gambar marker per tipe kendaraan.
- * Semua fallback tetap ke `kurir` supaya tidak crash.
- */
 const MARKER_IMG: Record<string, any> = {
     kurir: require('../../assets/images/kurir-map.png'),
     motor: require('../../assets/images/motor-map.png'),
     mobil: require('../../assets/images/mobil-map.png'),
     motor_food: require('../../assets/images/kurir-map.png'),
 };
-
 const DEFAULT_MARKER = MARKER_IMG.kurir;
 
 const REFETCH_ROUTE_METERS = 100; // ambil rute ulang kalau driver bergeser > 100 m
-const MARKER_ANIM_MS = 1000; // durasi animasi marker antar update lokasi
+// Sedikit lebih pendek dari interval polling (3000 ms) di GoSendFlow
+const MARKER_ANIM_MS = 2800;
+const HEADING_MIN_METERS = 5; // abaikan jitter GPS untuk arah ikon
+// 0 jika gambar menghadap ke atas (utara). Ubah (90/180/-90) bila perlu.
+const ICON_HEADING_OFFSET = 0;
 
 type LatLng = { latitude: number; longitude: number };
 
+const toRad = (d: number) => (d * Math.PI) / 180;
+
 function distanceMeters(a: LatLng, b: LatLng): number {
     const R = 6371000;
-    const toRad = (d: number) => (d * Math.PI) / 180;
     const dLat = toRad(b.latitude - a.latitude);
     const dLon = toRad(b.longitude - a.longitude);
     const x =
@@ -102,6 +95,50 @@ function distanceMeters(a: LatLng, b: LatLng): number {
         Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.sqrt(x));
 }
+
+function nearestIndex(polyline: LatLng[], pos: LatLng): number {
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < polyline.length; i++) {
+        const d = distanceMeters(pos, polyline[i]);
+        if (d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+function remainingDistance(polyline: LatLng[], fromIdx: number): number {
+    let total = 0;
+    for (let i = fromIdx; i < polyline.length - 1; i++) {
+        total += distanceMeters(polyline[i], polyline[i + 1]);
+    }
+    return total;
+}
+
+function bearing(a: LatLng, b: LatLng): number {
+    const y =
+        Math.sin(toRad(b.longitude - a.longitude)) * Math.cos(toRad(b.latitude));
+    const x =
+        Math.cos(toRad(a.latitude)) * Math.sin(toRad(b.latitude)) -
+        Math.sin(toRad(a.latitude)) *
+        Math.cos(toRad(b.latitude)) *
+        Math.cos(toRad(b.longitude - a.longitude));
+    return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+function getMarkerImage(vehicleType?: string | null) {
+    if (!vehicleType) return DEFAULT_MARKER;
+    return MARKER_IMG[vehicleType.toLowerCase()] ?? DEFAULT_MARKER;
+}
+
+const sizeLabel = (size?: string | null) =>
+    !size
+        ? ''
+        : size === 'kecil'
+            ? 'Kecil'
+            : size.charAt(0).toUpperCase() + size.slice(1);
 
 function RouteDot({ type }: { type: 'origin' | 'destination' }) {
     if (type === 'origin') {
@@ -141,19 +178,6 @@ function Avatar({ name, uri }: { name: string; uri?: string }) {
     );
 }
 
-const sizeLabel = (size?: string | null) =>
-    !size
-        ? ''
-        : size === 'kecil'
-            ? 'Kecil'
-            : size.charAt(0).toUpperCase() + size.slice(1);
-
-/** Ambil gambar marker sesuai tipe kendaraan driver, fallback ke kurir */
-function getMarkerImage(vehicleType?: string | null) {
-    if (!vehicleType) return DEFAULT_MARKER;
-    return MARKER_IMG[vehicleType.toLowerCase()] ?? DEFAULT_MARKER;
-}
-
 export default function DriverFoundStep({
     order,
     driver,
@@ -172,12 +196,19 @@ export default function DriverFoundStep({
     const { origin, destination, option, packageInfo, sender, receiver } = order;
     const showCode = !!packageInfo.receiveCode;
 
-    // marker bergerak hanya kalau driver sudah accept
-    const isTracking = status === 'accepted' || status === 'arrived';
+    // ---- Fase berdasarkan status backend ----
+    // 'in_progress' bisa muncul sesaat sebelum flow pindah ke on-trip
+    const isTracking =
+        status === 'accepted' ||
+        status === 'arrived' ||
+        status === 'in_progress';
     const isWaiting = status === 'searching' || status === 'pending';
+    const isSearching = status === 'searching';
 
     const SHEET_H =
         Math.round(Math.min(windowHeight * 0.6, 540)) + insets.bottom;
+
+    const driverPos: LatLng = driver.coords;
 
     const [route, setRoute] = useState<RouteInfo | null>(null);
     const [trackView, setTrackView] = useState(true);
@@ -185,7 +216,7 @@ export default function DriverFoundStep({
     const onArrivedRef = useRef(onArrived);
     onArrivedRef.current = onArrived;
 
-    // ---- Rute driver -> titik jemput, refresh kalau driver bergeser jauh ----
+    // ---- Rute driver -> titik jemput ----
     const lastFetchRef = useRef<LatLng | null>(null);
     const reqRef = useRef(0);
     const mountedRef = useRef(true);
@@ -198,81 +229,86 @@ export default function DriverFoundStep({
 
     useEffect(() => {
         const prev = lastFetchRef.current;
-        if (
-            prev &&
-            distanceMeters(prev, driver.coords) < REFETCH_ROUTE_METERS
-        )
+        if (prev && distanceMeters(prev, driverPos) < REFETCH_ROUTE_METERS) {
             return;
+        }
 
-        lastFetchRef.current = driver.coords;
+        lastFetchRef.current = driverPos;
         const id = ++reqRef.current;
-        getRoute(driver.coords, origin.coords)
+        getRoute(driverPos, origin.coords)
             .then((r) => {
                 if (mountedRef.current && id === reqRef.current) setRoute(r);
             })
             .catch((err) =>
-                console.warn('[DriverFound] Gagal ambil rute:', err?.message)
+                console.warn('[GoSend DriverFound] Gagal ambil rute:', err?.message)
             );
     }, [
-        driver.coords.latitude,
-        driver.coords.longitude,
+        driverPos.latitude,
+        driverPos.longitude,
         origin.coords.latitude,
         origin.coords.longitude,
     ]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const polyline = useMemo(
+    const polyline = useMemo<LatLng[]>(
         () =>
             route?.polyline?.length
                 ? route.polyline
-                : [driver.coords, origin.coords],
-        [route, driver.coords, origin.coords]
+                : [driverPos, origin.coords],
+        [route, driverPos.latitude, driverPos.longitude, origin.coords] // eslint-disable-line react-hooks/exhaustive-deps
     );
 
-    // ---- Marker driver bergerak halus antar update lokasi ----
+    // ---- Posisi driver pada polyline: bagian yang dilewati dipangkas ----
+    const idx = useMemo(
+        () => nearestIndex(polyline, driverPos),
+        [polyline, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
+    );
+    const ahead = useMemo(
+        () => [driverPos, ...polyline.slice(idx + 1)],
+        [polyline, idx, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
+    );
+
+    // ---- Marker driver bergerak halus ----
     const driverCoord = useRef(
         new AnimatedRegion({
-            latitude: driver.coords.latitude,
-            longitude: driver.coords.longitude,
+            latitude: driverPos.latitude,
+            longitude: driverPos.longitude,
             latitudeDelta: 0,
             longitudeDelta: 0,
         })
     ).current;
 
     useEffect(() => {
-        // Saat status masih pending/searching, jangan animasi — posisikan langsung.
+        // Saat belum ada driver yang menerima, posisikan langsung tanpa animasi
         if (!isTracking) {
             driverCoord.setValue({
-                latitude: driver.coords.latitude,
-                longitude: driver.coords.longitude,
+                latitude: driverPos.latitude,
+                longitude: driverPos.longitude,
                 latitudeDelta: 0,
                 longitudeDelta: 0,
             });
             return;
         }
 
-        driverCoord
-            .timing({
-                latitude: driver.coords.latitude,
-                longitude: driver.coords.longitude,
-                latitudeDelta: 0,
-                longitudeDelta: 0,
-                duration: MARKER_ANIM_MS,
-                useNativeDriver: false,
-            } as any)
-            .start();
-    }, [
-        driver.coords.latitude,
-        driver.coords.longitude,
-        driverCoord,
-        isTracking,
-    ]);
+        const config: any = {
+            latitude: driverPos.latitude,
+            longitude: driverPos.longitude,
+            latitudeDelta: 0,
+            longitudeDelta: 0,
+            duration: MARKER_ANIM_MS,
+            useNativeDriver: false,
+        };
+        driverCoord.timing(config).start();
+    }, [driverPos.latitude, driverPos.longitude, driverCoord, isTracking]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // marker berisi Image -> tracksViewChanges sebentar supaya gambar ter-render, lalu dimatikan
+    // ---- Arah ikon dari pergerakan terakhir ----
+    const [heading, setHeading] = useState(0);
+    const prevPosRef = useRef<LatLng>(driverPos);
     useEffect(() => {
-        setTrackView(true);
-        const t = setTimeout(() => setTrackView(false), 1200);
-        return () => clearTimeout(t);
-    }, [driver.vehicleType]);
+        if (distanceMeters(prevPosRef.current, driverPos) > HEADING_MIN_METERS) {
+            setHeading(bearing(prevPosRef.current, driverPos));
+            prevPosRef.current = driverPos;
+        }
+    }, [driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ---- Fit peta: sekali saat rute pertama tiba ----
     const fittedRef = useRef(false);
@@ -294,15 +330,9 @@ export default function DriverFoundStep({
         }
     }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ---- Status sampai ----
-    // ⚠️ FIX: "arrived" ditentukan backend (status === 'arrived').
-    // JANGAN pakai jarak — karena saat driver accept, coords-nya bisa sudah
-    // dekat dengan pickup (driver memang di sekitar sana) sehingga UI salah
-    // anggap "sudah sampai" padahal backend masih 'accepted'.
-    const distToPickup = distanceMeters(driver.coords, origin.coords);
+    // ---- Status sampai: HANYA dari backend (bukan jarak) ----
     const arrived = status === 'arrived';
 
-    // Trigger onArrived sekali saja saat backend bilang arrived
     useEffect(() => {
         if (arrived && !arrivedFiredRef.current) {
             arrivedFiredRef.current = true;
@@ -310,12 +340,18 @@ export default function DriverFoundStep({
         }
     }, [arrived]);
 
-    // ETA:
-    // - kalau tracking: pakai durationSec dari rute
-    // - kalau menunggu: pakai driver.etaMinutes (dari backend)
-    const remainSec = isTracking
-        ? route?.durationSec ?? (driver.etaMinutes ?? 5) * 60
-        : (driver.etaMinutes ?? 5) * 60;
+    // ---- ETA: dari sisa rute bila tracking, selain itu dari backend ----
+    const remainingMeters = useMemo(() => {
+        if (polyline.length < 2) return 0;
+        return distanceMeters(driverPos, polyline[idx]) + remainingDistance(polyline, idx);
+    }, [polyline, idx, driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const routeMeters = route?.distanceMeters ?? 0;
+    const fallbackSec = (driver.etaMinutes ?? 5) * 60;
+    const remainSec =
+        isTracking && route?.durationSec && routeMeters > 0
+            ? route.durationSec * Math.min(1, remainingMeters / routeMeters)
+            : fallbackSec;
     const minutes = Math.max(1, Math.ceil(remainSec / 60));
 
     const call = () => {
@@ -330,7 +366,9 @@ export default function DriverFoundStep({
             ? 'Mencari driver…'
             : status === 'pending'
                 ? 'Menunggu driver menerima pesanan…'
-                : 'Driver menuju lokasi jemputmu';
+                : status === 'in_progress'
+                    ? 'Paketmu sedang diantar'
+                    : 'Driver menuju lokasi jemputmu';
 
     const statusSub = arrived
         ? 'Segera temui drivermu di titik jemput'
@@ -340,7 +378,6 @@ export default function DriverFoundStep({
                 ? 'Pesananmu sudah dikirim ke driver'
                 : 'Pantau posisinya di peta';
 
-    // ---- Marker image dinamis ----
     const markerImg = getMarkerImage(driver.vehicleType);
 
     return (
@@ -348,31 +385,37 @@ export default function DriverFoundStep({
             <MapView
                 ref={mapRef}
                 style={StyleSheet.absoluteFill}
+                customMapStyle={mapStyle}
                 provider={MAP_PROVIDER}
                 toolbarEnabled={false}
                 rotateEnabled={false}
                 onMapReady={fit}
                 initialRegion={{
-                    latitude: driver.coords.latitude,
-                    longitude: driver.coords.longitude,
+                    latitude: driverPos.latitude,
+                    longitude: driverPos.longitude,
                     latitudeDelta: 0.03,
                     longitudeDelta: 0.03,
                 }}
             >
-                <Polyline
-                    coordinates={polyline}
-                    strokeColor="#ffffff"
-                    strokeWidth={9}
-                    lineCap="round"
-                    lineJoin="round"
-                />
-                <Polyline
-                    coordinates={polyline}
-                    strokeColor={colors.primary}
-                    strokeWidth={5}
-                    lineCap="round"
-                    lineJoin="round"
-                />
+                {/* Polyline aktif (driver -> pickup), memendek mengikuti driver */}
+                {ahead.length > 1 && (
+                    <>
+                        <Polyline
+                            coordinates={ahead}
+                            strokeColor="#ffffff"
+                            strokeWidth={9}
+                            lineCap="round"
+                            lineJoin="round"
+                        />
+                        <Polyline
+                            coordinates={ahead}
+                            strokeColor={colors.primary}
+                            strokeWidth={5}
+                            lineCap="round"
+                            lineJoin="round"
+                        />
+                    </>
+                )}
 
                 <Marker
                     coordinate={origin.coords}
@@ -387,10 +430,12 @@ export default function DriverFoundStep({
                 </Marker>
 
                 {/* Marker driver hanya muncul kalau sudah ada driver dari backend */}
-                {status !== 'searching' && (
+                {!isSearching && (
                     <MarkerAnimated
                         coordinate={driverCoord as any}
                         anchor={{ x: 0.5, y: 0.5 }}
+                        flat
+                        rotation={(heading + ICON_HEADING_OFFSET) % 360}
                         tracksViewChanges={trackView}
                         zIndex={2}
                     >
@@ -399,6 +444,8 @@ export default function DriverFoundStep({
                                 source={markerImg}
                                 style={{ width: 34, height: 34 }}
                                 resizeMode="contain"
+                                // matikan tracksViewChanges setelah gambar siap (hindari ikon hilang di Android)
+                                onLoad={() => setTimeout(() => setTrackView(false), 150)}
                             />
                         </View>
                     </MarkerAnimated>
@@ -452,34 +499,22 @@ export default function DriverFoundStep({
                             <Text style={s.statusSub}>{statusSub}</Text>
                         </View>
                         <View style={s.etaBox}>
-                            <Text style={s.etaNum}>
-                                {arrived ? '0' : minutes}
-                            </Text>
+                            <Text style={s.etaNum}>{arrived ? '0' : minutes}</Text>
                             <Text style={s.etaUnit}>mnt</Text>
                         </View>
                     </View>
 
-                    {/* data driver — tampil hanya kalau driver sudah ada */}
-                    {!isWaiting || status === 'pending' ? (
+                    {/* data driver, tampil hanya kalau driver sudah ada */}
+                    {!isSearching ? (
                         <View style={s.driverCard}>
                             <View style={s.driverTop}>
-                                <Avatar
-                                    name={driver.name}
-                                    uri={driver.photoUrl}
-                                />
+                                <Avatar name={driver.name} uri={driver.photoUrl} />
                                 <View style={{ flex: 1 }}>
-                                    <Text
-                                        style={s.driverName}
-                                        numberOfLines={1}
-                                    >
+                                    <Text style={s.driverName} numberOfLines={1}>
                                         {driver.name}
                                     </Text>
                                     <View style={s.ratingRow}>
-                                        <Ionicons
-                                            name="star"
-                                            size={14}
-                                            color="#f5a623"
-                                        />
+                                        <Ionicons name="star" size={14} color="#f5a623" />
                                         <Text style={s.ratingText}>
                                             {(driver.rating ?? 0).toFixed(1)}
                                         </Text>
@@ -491,22 +526,16 @@ export default function DriverFoundStep({
 
                             <View style={s.vehicleRow}>
                                 <View style={{ flex: 1 }}>
-                                    <Text
-                                        style={s.vehicleName}
-                                        numberOfLines={1}
-                                    >
+                                    <Text style={s.vehicleName} numberOfLines={1}>
                                         {driver.vehicleModel}
                                     </Text>
                                 </View>
                                 <View style={s.plate}>
-                                    <Text style={s.plateText}>
-                                        {driver.vehiclePlate}
-                                    </Text>
+                                    <Text style={s.plateText}>{driver.vehiclePlate}</Text>
                                 </View>
                             </View>
                         </View>
                     ) : (
-                        // skeleton loading saat masih searching
                         <View style={s.skeletonCard}>
                             <Text style={s.skeletonText}>
                                 Sedang mencarikan driver untukmu…
@@ -518,33 +547,26 @@ export default function DriverFoundStep({
                     <View style={s.actionRow}>
                         <Pressable
                             onPress={onChat}
-                            style={[s.chatPill, isWaiting && s.disabled]}
-                            disabled={isWaiting && status === 'searching'}
+                            style={[s.chatPill, isSearching && s.disabled]}
+                            disabled={isSearching}
                         >
                             <Ionicons
                                 name="chatbubble-ellipses-outline"
                                 size={20}
                                 color={colors.textMuted}
                             />
-                            <Text style={s.chatText}>
-                                Kirim pesan ke driver
-                            </Text>
+                            <Text style={s.chatText}>Kirim pesan ke driver</Text>
                         </Pressable>
                         <Pressable
                             onPress={call}
-                            style={[
-                                s.callBtn,
-                                isWaiting &&
-                                status === 'searching' &&
-                                s.disabled,
-                            ]}
-                            disabled={isWaiting && status === 'searching'}
+                            style={[s.callBtn, isSearching && s.disabled]}
+                            disabled={isSearching}
                         >
                             <Ionicons name="call" size={22} color="#fff" />
                         </Pressable>
                     </View>
 
-                    {/* detail paket (dari order) */}
+                    {/* detail paket */}
                     <View style={s.infoCard}>
                         <View style={s.infoRow}>
                             <Ionicons
@@ -554,24 +576,17 @@ export default function DriverFoundStep({
                             />
                             <View style={{ flex: 1 }}>
                                 <Text style={s.infoTitle}>
-                                    {[
-                                        packageInfo.type,
-                                        sizeLabel(packageInfo.size),
-                                    ]
+                                    {[packageInfo.type, sizeLabel(packageInfo.size)]
                                         .filter(Boolean)
                                         .join(' • ')}
                                 </Text>
                                 {!!packageInfo.weight && (
-                                    <Text style={s.infoSub}>
-                                        {packageInfo.weight}
-                                    </Text>
+                                    <Text style={s.infoSub}>{packageInfo.weight}</Text>
                                 )}
                             </View>
                         </View>
 
-                        {(sender || receiver) && (
-                            <View style={s.infoDivider} />
-                        )}
+                        {(sender || receiver) && <View style={s.infoDivider} />}
 
                         {sender && (
                             <View style={s.infoRow}>
@@ -608,26 +623,18 @@ export default function DriverFoundStep({
                         <View style={{ flex: 1 }}>
                             <Text style={s.fareLabel}>{option.name}</Text>
                             <View style={s.payRow}>
-                                <Ionicons
-                                    name="wallet"
-                                    size={13}
-                                    color={colors.primary}
-                                />
+                                <Ionicons name="wallet" size={13} color={colors.primary} />
                                 <Text style={s.payText}>Tunai</Text>
                             </View>
                         </View>
-                        <Text style={s.farePrice}>
-                            {formatRupiah(option.price)}
-                        </Text>
+                        <Text style={s.farePrice}>{formatRupiah(option.price)}</Text>
                     </View>
 
-                    {/* kode keamanan: hanya kalau "Kode terima paket" diaktifkan */}
+                    {/* kode keamanan */}
                     {showCode && (
                         <View style={[s.fareRow, { borderTopWidth: 0 }]}>
                             <View style={{ flex: 1 }}>
-                                <Text style={s.fareLabel}>
-                                    Kode keamanan
-                                </Text>
+                                <Text style={s.fareLabel}>Kode keamanan</Text>
                                 <View style={s.payRow}>
                                     <Ionicons
                                         name="shield-checkmark"
@@ -635,22 +642,17 @@ export default function DriverFoundStep({
                                         color={colors.primary}
                                     />
                                     <Text style={s.payText}>
-                                        Cocokkan dengan driver sebelum serah
-                                        terima
+                                        Cocokkan dengan driver sebelum serah terima
                                     </Text>
                                 </View>
                             </View>
-                            <Text style={s.codeText}>
-                                {securityCode || '—'}
-                            </Text>
+                            <Text style={s.codeText}>{securityCode || '—'}</Text>
                         </View>
                     )}
 
                     {onCancel && (
                         <Pressable onPress={onCancel} style={s.cancelBtn}>
-                            <Text style={s.cancelText}>
-                                Batalkan pesanan
-                            </Text>
+                            <Text style={s.cancelText}>Batalkan pesanan</Text>
                         </Pressable>
                     )}
                 </ScrollView>
@@ -665,7 +667,6 @@ const s = StyleSheet.create({
         height: 46,
         alignItems: 'center',
         justifyContent: 'center',
-        borderColor: colors.primary,
     },
     pickupMarker: {
         width: 26,
@@ -733,11 +734,7 @@ const s = StyleSheet.create({
         shadowOpacity: 0.12,
         shadowRadius: 10,
     },
-    handleArea: {
-        alignItems: 'center',
-        paddingTop: 10,
-        paddingBottom: 12,
-    },
+    handleArea: { alignItems: 'center', paddingTop: 10, paddingBottom: 12 },
     handle: {
         width: 40,
         height: 4,

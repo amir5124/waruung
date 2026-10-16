@@ -1,3 +1,4 @@
+import { mapStyle } from '@/constants/ojek-map-style';
 import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
 import { getRoute } from '@/services/google-maps';
@@ -40,7 +41,7 @@ export type Driver = {
 type Props = {
     payload: OrderPayload;
     driver: Driver; // driver.coords diperbarui realtime oleh OjekFlow (polling)
-    status?: string; // status order dari backend: 'accepted' | 'arrived'
+    status?: string; // 'accepted' | 'arrived' | 'in_progress'
     onBack: () => void;
     onCancel: () => void;
     onArrived?: () => void;
@@ -62,6 +63,13 @@ const MARKER_ANIM_MS = 2800;
 const REFETCH_ROUTE_METERS = 100;
 // Fallback "sampai" berdasarkan jarak jika status backend belum 'arrived'
 const ARRIVE_METERS = 30;
+// Jarak minimum (meter) supaya arah ikon diperbarui (hindari jitter GPS)
+const HEADING_MIN_METERS = 5;
+// Offset rotasi ikon: 0 jika gambar menghadap ke atas (utara).
+// Ubah (mis. 90, 180, -90) jika gambar menghadap arah lain.
+const ICON_HEADING_OFFSET = 0;
+// Zoom saat kamera mengikuti driver selama trip
+const FOLLOW_ZOOM = 16;
 
 type LatLng = { latitude: number; longitude: number };
 
@@ -100,6 +108,19 @@ function nearestIndex(polyline: LatLng[], pos: LatLng): number {
         }
     }
     return best;
+}
+
+/** Arah (derajat 0-360, 0 = utara) dari titik a ke titik b */
+function bearing(a: LatLng, b: LatLng): number {
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const y =
+        Math.sin(toRad(b.longitude - a.longitude)) * Math.cos(toRad(b.latitude));
+    const x =
+        Math.cos(toRad(a.latitude)) * Math.sin(toRad(b.latitude)) -
+        Math.sin(toRad(a.latitude)) *
+        Math.cos(toRad(b.latitude)) *
+        Math.cos(toRad(b.longitude - a.longitude));
+    return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
 function RouteDot({ type }: { type: 'origin' | 'destination' }) {
@@ -157,6 +178,12 @@ export default function DriverFoundStep({
 
     const driverPos: LatLng = driver.coords;
 
+    // ---- Fase: jemput (accepted/arrived) atau trip (in_progress) ----
+    const isTrip = status === 'in_progress';
+    const target: LatLng = isTrip
+        ? payload.destination.coords
+        : payload.origin.coords;
+
     const [route, setRoute] = useState<RouteInfo | null>(null);
     const [trackView, setTrackView] = useState(true);
     const fittedRef = useRef(false);
@@ -165,7 +192,7 @@ export default function DriverFoundStep({
     onArrivedRef.current = onArrived;
     const arrivedFiredRef = useRef(false);
 
-    // ---- Rute driver -> titik jemput, refresh kalau driver bergeser > 100m ----
+    // ---- Rute driver -> target, refresh kalau driver bergeser > 100m ----
     const lastFetchRef = useRef<LatLng | null>(null);
     const reqRef = useRef(0);
     const mountedRef = useRef(true);
@@ -176,6 +203,20 @@ export default function DriverFoundStep({
         };
     }, []);
 
+    // Reset rute saat fase berganti (jemput -> trip), supaya rute baru
+    // langsung diambil dan kamera di-fit ulang.
+    // Dideklarasikan SEBELUM effect fetch agar urutan eksekusinya benar.
+    const firstPhaseRef = useRef(true);
+    useEffect(() => {
+        if (firstPhaseRef.current) {
+            firstPhaseRef.current = false;
+            return;
+        }
+        lastFetchRef.current = null;
+        fittedRef.current = false;
+        setRoute(null);
+    }, [isTrip]);
+
     useEffect(() => {
         const prev = lastFetchRef.current;
         if (prev && distanceMeters(prev, driver.coords) < REFETCH_ROUTE_METERS) {
@@ -185,7 +226,7 @@ export default function DriverFoundStep({
         lastFetchRef.current = driver.coords;
         const id = ++reqRef.current;
 
-        getRoute(driver.coords, payload.origin.coords)
+        getRoute(driver.coords, target)
             .then((r) => {
                 if (mountedRef.current && id === reqRef.current) {
                     setRoute(r);
@@ -197,16 +238,17 @@ export default function DriverFoundStep({
     }, [
         driver.coords.latitude,
         driver.coords.longitude,
-        payload.origin.coords.latitude,
-        payload.origin.coords.longitude,
+        target.latitude,
+        target.longitude,
+        isTrip,
     ]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const polyline = useMemo<LatLng[]>(
         () =>
             route?.polyline?.length
                 ? route.polyline
-                : [driver.coords, payload.origin.coords],
-        [route, driver.coords.latitude, driver.coords.longitude, payload.origin.coords] // eslint-disable-line react-hooks/exhaustive-deps
+                : [driver.coords, target],
+        [route, driver.coords.latitude, driver.coords.longitude, target.latitude, target.longitude] // eslint-disable-line react-hooks/exhaustive-deps
     );
 
     // ---- Posisi driver pada polyline: bagian yang sudah dilewati dipangkas ----
@@ -243,13 +285,17 @@ export default function DriverFoundStep({
             .start();
     }, [driver.coords.latitude, driver.coords.longitude, driverCoord]);
 
-    // ---- Matikan trackView setelah 500 ms (biar marker ringan) ----
+    // ---- Arah ikon: hitung dari pergerakan terakhir ----
+    const [heading, setHeading] = useState(0);
+    const prevPosRef = useRef<LatLng>(driver.coords);
     useEffect(() => {
-        const t = setTimeout(() => setTrackView(false), 500);
-        return () => clearTimeout(t);
-    }, [driver.vehicleType]);
+        if (distanceMeters(prevPosRef.current, driver.coords) > HEADING_MIN_METERS) {
+            setHeading(bearing(prevPosRef.current, driver.coords));
+            prevPosRef.current = driver.coords;
+        }
+    }, [driver.coords.latitude, driver.coords.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ---- Fit peta: sekali saat rute pertama tiba ----
+    // ---- Fit peta: sekali saat rute pertama tiba (per fase) ----
     const fit = () => {
         mapRef.current?.fitToCoordinates(polyline, {
             edgePadding: {
@@ -268,13 +314,23 @@ export default function DriverFoundStep({
         }
     }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // ---- Kamera mengikuti driver selama trip ----
+    useEffect(() => {
+        if (!isTrip || !fittedRef.current) return;
+        mapRef.current?.animateCamera(
+            { center: driver.coords, zoom: FOLLOW_ZOOM },
+            { duration: MARKER_ANIM_MS }
+        );
+    }, [isTrip, driver.coords.latitude, driver.coords.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
+
     // ---- Sisa jarak & ETA dari posisi driver ----
     const remainingMeters =
         distanceMeters(driverPos, polyline[idx]) + remainingDistance(polyline, idx);
     const distToPickup = distanceMeters(driverPos, payload.origin.coords);
 
-    // ---- Status "sampai": utamakan status backend, jarak sebagai cadangan ----
-    const arrived = status === 'arrived' || distToPickup <= ARRIVE_METERS;
+    // ---- Status "sampai": hanya relevan di fase jemput ----
+    const arrived =
+        !isTrip && (status === 'arrived' || distToPickup <= ARRIVE_METERS);
 
     useEffect(() => {
         if (arrived && !arrivedFiredRef.current) {
@@ -297,11 +353,24 @@ export default function DriverFoundStep({
         VEHICLE_IMG[driver.vehicleType ?? payload.service] ??
         VEHICLE_IMG.motor;
 
+    // ---- Teks status per fase ----
+    const statusTitle = isTrip
+        ? 'Dalam perjalanan ke tujuan'
+        : arrived
+            ? 'Drivermu sudah sampai'
+            : 'Driver menuju lokasi jemputmu';
+    const statusSub = isTrip
+        ? 'Duduk yang nyaman, pantau perjalananmu di peta'
+        : arrived
+            ? 'Segera temui drivermu di titik jemput'
+            : 'Pantau posisinya di peta';
+
     return (
         <View style={{ flex: 1 }}>
             <MapView
                 ref={mapRef}
                 style={StyleSheet.absoluteFill}
+                customMapStyle={mapStyle}
                 provider={MAP_PROVIDER}
                 toolbarEnabled={false}
                 rotateEnabled={false}
@@ -313,7 +382,7 @@ export default function DriverFoundStep({
                     longitudeDelta: 0.03,
                 }}
             >
-                {/* Polyline aktif (driver -> pickup), memendek mengikuti driver */}
+                {/* Polyline aktif (driver -> target), memendek mengikuti driver */}
                 {ahead.length > 1 && (
                     <>
                         <Polyline
@@ -333,20 +402,36 @@ export default function DriverFoundStep({
                     </>
                 )}
 
-                {/* Marker titik jemput */}
-                <Marker
-                    coordinate={payload.origin.coords}
-                    image={MARKER_ORIGIN}
-                    anchor={{ x: 0.5, y: 1 }}
-                    title={payload.origin.name}
-                    description="Titik jemput"
-                    zIndex={1}
-                />
+                {/* Marker titik jemput (disembunyikan saat trip berjalan) */}
+                {!isTrip && (
+                    <Marker
+                        coordinate={payload.origin.coords}
+                        image={MARKER_ORIGIN}
+                        anchor={{ x: 0.5, y: 1 }}
+                        title={payload.origin.name}
+                        description="Titik jemput"
+                        zIndex={1}
+                    />
+                )}
 
-                {/* Marker driver — DINAMIS dari driver.coords (realtime) */}
+                {/* Marker tujuan (muncul saat trip berjalan) */}
+                {isTrip && (
+                    <Marker
+                        coordinate={payload.destination.coords}
+                        anchor={{ x: 0.5, y: 1 }}
+                        pinColor={ORANGE}
+                        title={payload.destination.name}
+                        description="Tujuan"
+                        zIndex={1}
+                    />
+                )}
+
+                {/* Marker driver: dinamis dari driver.coords (realtime) */}
                 <MarkerAnimated
                     coordinate={driverCoord}
                     anchor={{ x: 0.5, y: 0.5 }}
+                    flat
+                    rotation={(heading + ICON_HEADING_OFFSET) % 360}
                     tracksViewChanges={trackView}
                     zIndex={2}
                 >
@@ -355,6 +440,8 @@ export default function DriverFoundStep({
                             source={vehicleIcon}
                             style={{ width: 34, height: 34 }}
                             resizeMode="contain"
+                            // matikan tracksViewChanges hanya setelah gambar benar-benar siap
+                            onLoad={() => setTimeout(() => setTrackView(false), 150)}
                         />
                     </View>
                 </MarkerAnimated>
@@ -400,16 +487,8 @@ export default function DriverFoundStep({
                 >
                     <View style={s.statusRow}>
                         <View style={{ flex: 1 }}>
-                            <Text style={s.statusTitle}>
-                                {arrived
-                                    ? 'Drivermu sudah sampai'
-                                    : 'Driver menuju lokasi jemputmu'}
-                            </Text>
-                            <Text style={s.statusSub}>
-                                {arrived
-                                    ? 'Segera temui drivermu di titik jemput'
-                                    : 'Pantau posisinya di peta'}
-                            </Text>
+                            <Text style={s.statusTitle}>{statusTitle}</Text>
+                            <Text style={s.statusSub}>{statusSub}</Text>
                         </View>
                         <View style={s.etaBox}>
                             <Text style={s.etaNum}>
@@ -506,9 +585,12 @@ export default function DriverFoundStep({
                         </Text>
                     </View>
 
-                    <Pressable onPress={onCancel} style={s.cancelBtn}>
-                        <Text style={s.cancelText}>Batalkan pesanan</Text>
-                    </Pressable>
+                    {/* Pembatalan disembunyikan saat trip sudah berjalan */}
+                    {!isTrip && (
+                        <Pressable onPress={onCancel} style={s.cancelBtn}>
+                            <Text style={s.cancelText}>Batalkan pesanan</Text>
+                        </Pressable>
+                    )}
                 </ScrollView>
             </Animated.View>
         </View>

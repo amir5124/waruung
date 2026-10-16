@@ -1,3 +1,4 @@
+// lib/api.ts
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
@@ -13,7 +14,9 @@ console.log('[api] ================================');
 
 const TOKEN_KEY = 'auth_token';
 
-// ---------- Token helpers ----------
+// ============================================================
+// TOKEN HELPERS
+// ============================================================
 export async function saveToken(token: string): Promise<void> {
     await SecureStore.setItemAsync(TOKEN_KEY, token);
 }
@@ -26,7 +29,9 @@ export async function clearToken(): Promise<void> {
     await SecureStore.deleteItemAsync(TOKEN_KEY);
 }
 
-// ---------- Helpers ----------
+// ============================================================
+// HELPERS
+// ============================================================
 function guessMimeType(filename: string): string {
     const ext = filename.toLowerCase().split('.').pop();
     switch (ext) {
@@ -41,7 +46,48 @@ function guessMimeType(filename: string): string {
     }
 }
 
-// ---------- Response types ----------
+async function fetchWithTimeout(
+    url: string,
+    init: RequestInit = {},
+    ms = 30000
+): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+        return await fetch(url, { ...init, signal: controller.signal });
+    } catch (err: any) {
+        if (err?.name === 'AbortError') {
+            throw new Error(
+                'Server terlalu lama merespons. Coba lagi sebentar.'
+            );
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// ✅ Helper query string
+function qs(
+    params?: Record<
+        string,
+        string | number | boolean | undefined | null
+    >
+): string {
+    if (!params) return '';
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') {
+            search.append(k, String(v));
+        }
+    });
+    const s = search.toString();
+    return s ? `?${s}` : '';
+}
+
+// ============================================================
+// TYPES
+// ============================================================
 export interface AuthResponse {
     token: string;
     userId: string;
@@ -59,7 +105,6 @@ export interface ProfileResponse {
     created_at?: string;
 }
 
-// ---- Info customer (di dalam order) ----
 export interface CustomerInfo {
     id: string;
     full_name: string | null;
@@ -72,7 +117,6 @@ export interface CustomerInfo {
     } | null;
 }
 
-// ---- Info driver (di dalam order) ----
 export interface DriverInfo {
     id: string;
     full_name: string | null;
@@ -87,37 +131,47 @@ export interface DriverInfo {
     coords?: { latitude: number; longitude: number } | null;
 }
 
-// ============================================================
-// Create Order Payload
-// ============================================================
 export interface CreateOrderPayload {
     type: 'ride' | 'food' | 'send';
+
     pickup_name: string;
     pickup_address: string;
     pickup_lat: number;
     pickup_lng: number;
+
     dropoff_name: string;
     dropoff_address: string;
     dropoff_lat: number;
     dropoff_lng: number;
+
     distance_km: number;
     duration_min?: number;
-    payment_method?: 'cash' | 'wallet' | 'qris' | 'bank_transfer';
-    bank_code?: string;                                              // ⬅️ TAMBAH
-    // ewallet_code?: 'OVO' | 'DANA' | 'LINKAJA' | 'GOPAY' | 'SHOPEEPAY'; 
 
+    payment_method?: 'cash' | 'wallet' | 'qris' | 'bank_transfer';
+    bank_code?: string;
 
     notes?: string;
+
+    // FOOD
     merchant_id?: string;
-    tariff_code?: string;
-    option_name?: string;
     items?: Array<{
         menu_item_id: number;
         name: string;
         variant?: string;
         qty: number;
         price: number;
+        note?: string;
     }>;
+    subtotal?: number;
+    delivery_fee?: number;
+    service_fee?: number;
+    total?: number;
+
+    // RIDE
+    tariff_code?: string;
+    option_name?: string;
+
+    // SEND
     receiver_name?: string;
     receiver_phone?: string;
     sender_name?: string;
@@ -130,9 +184,6 @@ export interface CreateOrderPayload {
     package_protection?: 'silver' | 'gold';
 }
 
-// ============================================================
-// Order Response
-// ============================================================
 export interface OrderResponse {
     id: number;
     order_code: string;
@@ -147,23 +198,28 @@ export interface OrderResponse {
     customer_id: string;
     driver_id: string | null;
     merchant_id: string | null;
+
     pickup_name: string | null;
     pickup_address: string | null;
     dropoff_name: string | null;
     dropoff_address: string | null;
     distance_km: number | null;
     duration_min: number | null;
+
     subtotal: number;
     delivery_fee: number;
     packaging_fee: number;
     admin_fee: number;
     total_fare: number;
+
     driver_earning: number;
     merchant_earning: number;
     platform_earning: number;
+
     payment_method: string;
     payment_status: string;
     notes: string | null;
+
     tariff_code?: string | null;
     option_name?: string | null;
     send_code?: string | null;
@@ -189,6 +245,17 @@ export interface OrderResponse {
         address: string | null;
         logo_url: string | null;
     } | null;
+
+    items?: Array<{
+        id: number;
+        menu_item_id: number;
+        name: string;
+        variant?: string | null;
+        qty: number;
+        price: number;
+        note?: string | null;
+        image_url?: string | null;
+    }> | null;
 
     sender_landmark?: string;
     receiver_landmark?: string;
@@ -232,7 +299,6 @@ export interface Tariff {
     sort_order: number;
 }
 
-// ---- Chat types ----
 export interface ChatRoom {
     id: number;
     order_id: number;
@@ -241,7 +307,27 @@ export interface ChatRoom {
     merchant_id: string | null;
     last_message_at: string | null;
     created_at: string;
+    chat_open?: boolean;
+    chat_closes_at?: string | null;
 }
+
+export interface ChatRoomListItem {
+    id: number;
+    order_id: number;
+    peer_id: string;
+    peer_name: string;
+    peer_avatar: string | null;
+    peer_role: 'customer' | 'driver' | 'merchant' | 'user';
+    last_message: string;
+    last_message_type: 'text' | 'image' | 'location';
+    last_message_at: string | null;
+    created_at: string;
+    unread_count?: number;
+    chat_open?: boolean;
+    chat_closes_at?: string | null;
+
+}
+
 
 export interface ChatMessage {
     id: number;
@@ -267,8 +353,131 @@ export interface NearbyDriver {
     coords: { latitude: number; longitude: number } | null;
 }
 
+export interface NearbyMerchant {
+    user_id: string;
+    store_name: string;
+    description?: string | null;
+    address?: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    logo_url?: string | null;
+    cover_url?: string | null;
+    open_hours?: string | Record<string, string> | null;
+    phone?: string | null;
+    is_open: boolean;
+    rating_avg?: number | null;
+    rating_count?: number | null;
+    total_orders?: number | null;
+    latest_review?: string | null;
+    category_label?: string | null;
+
+    distance_m?: number | null;
+    route_distance_m?: number | null;
+    delivery_fee?: number | null;
+    eta_min?: number | null;
+    eta_source?: 'google' | 'estimate' | null;
+}
+
+export interface MerchantMenuResponse {
+    merchant_id: string;
+    categories: Array<{ id: number; name: string; sort_order: number }>;
+    items: Array<{
+        id: number;
+        merchant_id: string;
+        category_id: number | null;
+        category_name?: string | null;
+        name: string;
+        description: string | null;
+        price: number;
+        image_url: string | null;
+        is_available: boolean;
+        stock: number | null;
+    }>;
+}
+
+export interface DeliveryEstimate {
+    distance_km: number;
+    delivery_fee: number;
+    service_fee: number;
+    eta_min: number;
+    eta_source: 'google' | 'estimate';
+}
+
+export interface PublicAsset {
+    id: number;
+    key: string;
+    category:
+    | 'banner'
+    | 'icon'
+    | 'marker'
+    | 'splash'
+    | 'other'
+    | string;
+    url: string;
+    width: number | null;
+    height: number | null;
+    label: string | null;
+}
+
+export interface TopupItem {
+    id: number;
+    partner_reff: string;
+    method: 'va' | 'qris';
+    amount: number;         // total bayar (nominal + fee)
+    nominal: number;        // nominal topup
+    admin_fee: number;      // fee
+    bank_code: string | null;
+    va_number: string | null;
+    qris_url: string | null;
+    status: 'PENDING' | 'SUCCESS' | 'FAILED' | 'EXPIRED';
+    created_at: string;
+    expired_at: string | null;
+}
+
+export interface WithdrawalItem {
+    id: number;
+    inquiry_reff: string;
+    partner_reff: string;
+    partner_reff_pay: string | null;
+    bank_code: string;
+    account_number: string;
+    amount: number;         // nominal
+    fee_admin: number;      // fee
+    status: 'INQUIRY' | 'PENDING' | 'SUCCESS' | 'FAILED';
+    created_at: string;
+    updated_at: string;
+}
+
+export interface TransactionItem {
+    id: string;             // "topup-1", "withdraw-2", "tx-3"
+    type:
+    | 'topup'
+    | 'withdraw'
+    | 'payout'
+    | 'order_payment'
+    | 'refund'
+    | 'adjustment'
+    | 'debt_payment'
+    | 'earning_cash'
+    | 'earning_gateway'
+    | 'commission_cash'
+    | 'commission_gateway';
+    amount: number;
+    total_amount: number;
+    admin_fee: number;
+    method: string;
+    status: string;
+    reference: string | null;
+    va_number?: string | null;
+    qris_url?: string | null;
+    bank_code?: string | null;
+    account_number?: string | null;
+    description: string;
+    created_at: string;
+}
+
 // ============================================================
-// Core request (JSON)
+// CORE REQUEST — JSON
 // ============================================================
 async function request<T>(
     path: string,
@@ -284,27 +493,60 @@ async function request<T>(
         if (token) headers.Authorization = `Bearer ${token}`;
     }
 
-    const res = await fetch(`${BASE_URL}${path}`, {
+    const url = `${BASE_URL}${path}`;
+
+    console.log('\n========== [api] REQUEST ==========');
+    console.log('[api] METHOD:', method);
+    console.log('[api] URL:', url);
+    console.log('[api] AUTH:', auth);
+    if (body) {
+        console.log('[api] BODY:', JSON.stringify(body, null, 2));
+    }
+    console.log('====================================\n');
+
+    const res = await fetchWithTimeout(url, {
         method,
         headers,
         body: body ? JSON.stringify(body) : undefined,
     });
 
     let json: any = null;
+    let text = '';
     try {
-        json = await res.json();
+        text = await res.text();
+        json = text ? JSON.parse(text) : null;
     } catch {
-        throw new Error(`Server error (${res.status})`);
+        console.log('[api] NON-JSON RESPONSE:', text);
     }
 
+    console.log('\n========== [api] RESPONSE ==========');
+    console.log('[api] STATUS:', res.status);
+    console.log('[api] OK:', res.ok);
+    console.log('[api] BODY:', JSON.stringify(json, null, 2));
+    console.log('=====================================\n');
+
     if (!res.ok || !json?.success) {
-        throw new Error(json?.message || `Request failed (${res.status})`);
+        console.log('\n========== [api] ERROR DETAIL ==========');
+        console.log('[api] MESSAGE:', json?.message);
+        console.log('[api] ERRORS:', json?.errors);
+        console.log('[api] DATA:', json?.data);
+        console.log('[api] FULL:', json);
+        console.log('=========================================\n');
+
+        let errMsg = json?.message || `Request failed (${res.status})`;
+        if (json?.errors && typeof json.errors === 'object') {
+            const fields = Object.entries(json.errors)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join('\n');
+            errMsg = `${errMsg}\n\n${fields}`;
+        }
+        throw new Error(errMsg);
     }
     return json.data as T;
 }
 
 // ============================================================
-// Upload file (multipart/form-data) — dipakai avatar & chat image
+// UPLOAD FILE (multipart)
 // ============================================================
 async function uploadFile<T>(
     path: string,
@@ -314,14 +556,12 @@ async function uploadFile<T>(
     const token = await getToken();
     const formData = new FormData();
 
-    // React Native: formData.append dengan object {uri, name, type}
     formData.append(fieldName, file as any);
 
     const headers: Record<string, string> = {};
     if (token) headers.Authorization = `Bearer ${token}`;
-    // ⚠️ JANGAN set Content-Type manual — fetch auto-set multipart boundary
 
-    const res = await fetch(`${BASE_URL}${path}`, {
+    const res = await fetchWithTimeout(`${BASE_URL}${path}`, {
         method: 'POST',
         headers,
         body: formData,
@@ -341,9 +581,36 @@ async function uploadFile<T>(
 }
 
 // ============================================================
-// API
+// API OBJECT
 // ============================================================
 export const api = {
+    // ────────────────────────────────────────────────────────
+    // PUBLIC (tanpa auth — untuk aplikasi customer)
+    // ────────────────────────────────────────────────────────
+    public: {
+        /**
+         * List asset publik per kategori.
+         * Endpoint: GET /api/public/assets?category=banner&limit=10
+         */
+        assets: (opts?: {
+            category?:
+            | 'banner'
+            | 'icon'
+            | 'marker'
+            | 'splash'
+            | 'other'
+            | string;
+            limit?: number;
+        }) =>
+            request<{ items: PublicAsset[] }>(
+                `/api/public/assets${qs({
+                    category: opts?.category,
+                    limit: opts?.limit,
+                })}`
+                // auth default = false → tanpa Authorization
+            ),
+    },
+
     // ===== Auth =====
     register: (input: {
         email: string;
@@ -378,24 +645,12 @@ export const api = {
             auth: true,
         }),
 
-    /**
-     * Upload foto profil ke backend.
-     * Backend akan upload ke Supabase Storage + update profiles.avatar_url.
-     *
-     * @param uri - local URI dari ImagePicker
-     * @param mimeType - 'image/jpeg' | 'image/png' | 'image/webp'
-     * @returns { avatar_url: string }
-     */
     uploadAvatar: (uri: string, mimeType = 'image/jpeg') => {
         const fileName = uri.split('/').pop() ?? 'avatar.jpg';
         return uploadFile<{ avatar_url: string }>(
             '/api/profiles/avatar',
             'image',
-            {
-                uri,
-                name: fileName,
-                type: mimeType,
-            }
+            { uri, name: fileName, type: mimeType }
         );
     },
 
@@ -403,6 +658,67 @@ export const api = {
         request<ProfileResponse>(`/api/profiles/${userId}`, { auth: true }),
 
     // ===== Orders =====
+    orders: {
+        create: (payload: CreateOrderPayload) =>
+            request<OrderResponse>('/api/orders', {
+                method: 'POST',
+                body: payload,
+                auth: true,
+            }),
+
+        get: (orderId: number) =>
+            request<OrderResponse>(`/api/orders/${orderId}`, { auth: true }),
+
+        list: (status?: string) =>
+            request<OrderResponse[]>(
+                `/api/orders${status ? `?status=${status}` : ''}`,
+                { auth: true }
+            ),
+
+        accept: (orderId: number) =>
+            request<OrderResponse>(`/api/orders/${orderId}/accept`, {
+                method: 'POST',
+                auth: true,
+            }),
+
+        updateStatus: (
+            orderId: number,
+            status:
+                | 'accepted'
+                | 'arrived'
+                | 'in_progress'
+                | 'completed'
+                | 'cancelled',
+            reason?: string,
+            sendCode?: string
+        ) =>
+            request<OrderResponse>(`/api/orders/${orderId}/status`, {
+                method: 'PUT',
+                body: { status, reason, send_code: sendCode },
+                auth: true,
+            }),
+
+        cancel: (orderId: number, reason?: string) =>
+            request<OrderResponse>(`/api/orders/${orderId}/status`, {
+                method: 'PUT',
+                body: { status: 'cancelled', reason },
+                auth: true,
+            }),
+
+        estimateDelivery: (input: {
+            merchant_id: string;
+            dropoff_lat: number;
+            dropoff_lng: number;
+            subtotal: number;
+        }) =>
+            request<DeliveryEstimate>('/api/orders/estimate-delivery', {
+                method: 'POST',
+                body: input,
+                auth: true,
+            }),
+    },
+
+    // Backward-compat (tetap didukung)
     createOrder: (payload: CreateOrderPayload) =>
         request<OrderResponse>('/api/orders', {
             method: 'POST',
@@ -483,7 +799,8 @@ export const api = {
             fileName?: string,
             mimeType?: string
         ) => {
-            const name = fileName ?? uri.split('/').pop() ?? 'photo.jpg';
+            const name =
+                fileName ?? uri.split('/').pop() ?? 'photo.jpg';
             const type = mimeType ?? guessMimeType(name);
             return uploadFile<ChatMessage>(
                 `/api/chats/rooms/${roomId}/images`,
@@ -499,13 +816,25 @@ export const api = {
             }),
 
         listRooms: () =>
-            request<ChatRoom[]>('/api/chats/rooms', { auth: true }),
+            request<ChatRoomListItem[]>('/api/chats/rooms', { auth: true }),
+
+        /** Status jendela chat (ditutup 30 menit setelah pesanan selesai). */
+        roomStatus: (roomId: number) =>
+            request<{
+                room_id: number;
+                order_id: number;
+                chat_open: boolean;
+                chat_closes_at: string | null;
+            }>(`/api/chats/rooms/${roomId}/status`, { auth: true }),
+
     },
 
     // ===== Saved Addresses =====
     savedAddresses: {
         list: () =>
-            request<SavedAddress[]>('/api/saved-addresses', { auth: true }),
+            request<SavedAddress[]>('/api/saved-addresses', {
+                auth: true,
+            }),
 
         get: (kind: 'home' | 'office' | 'other') =>
             request<SavedAddress | null>(`/api/saved-addresses/${kind}`, {
@@ -574,7 +903,12 @@ export const api = {
 
     // ===== Drivers =====
     drivers: {
-        nearby: (lat: number, lng: number, radius = 5000, limit = 50) =>
+        nearby: (
+            lat: number,
+            lng: number,
+            radius = 5000,
+            limit = 50
+        ) =>
             request<NearbyDriver[]>(
                 `/api/drivers/nearby?lat=${lat}&lng=${lng}&radius=${radius}&limit=${limit}`,
                 { auth: true }
@@ -591,9 +925,37 @@ export const api = {
             request<any>('/api/drivers/profile', { auth: true }),
     },
 
-    // ===== Wallet (topup via LinkQu) =====
+    // ===== Merchants =====
+    merchants: {
+        nearby: (lat: number, lng: number, radius = 5000) =>
+            request<NearbyMerchant[]>(
+                `/api/merchant/nearby?lat=${lat}&lng=${lng}&radius=${radius}`,
+                { auth: true }
+            ),
+
+        detail: (merchantId: string) =>
+            request<NearbyMerchant>(`/api/merchant/${merchantId}`, {
+                auth: true,
+            }),
+
+        profile: (merchantId: string) =>
+            request<any>(`/api/merchant/${merchantId}`, { auth: true }),
+
+        menu: (merchantId: string) =>
+            request<MerchantMenuResponse>(
+                `/api/merchant/${merchantId}/menu`,
+                { auth: true }
+            ),
+
+        foodMenu: (merchantId: string) =>
+            request<MerchantMenuResponse>(
+                `/api/merchant/${merchantId}/menu`,
+                { auth: true }
+            ),
+    },
+
+    // ===== Wallet =====
     wallet: {
-        /** Saldo customer */
         get: () =>
             request<{
                 balance: number;
@@ -602,7 +964,6 @@ export const api = {
                 updated_at: string;
             }>('/api/wallet', { auth: true }),
 
-        /** Riwayat transaksi wallet customer (wallet_transactions) */
         ledger: (limit = 50, offset = 0) =>
             request<
                 Array<{
@@ -615,9 +976,11 @@ export const api = {
                     description: string | null;
                     created_at: string;
                 }>
-            >(`/api/wallet/ledger?limit=${limit}&offset=${offset}`, { auth: true }),
+            >(
+                `/api/wallet/ledger?limit=${limit}&offset=${offset}`,
+                { auth: true }
+            ),
 
-        /** Topup: buat VA / QRIS */
         topupInquiry: (input: {
             amount: number;
             method: 'va' | 'qris';
@@ -635,7 +998,6 @@ export const api = {
                 auth: true,
             }),
 
-        /** Topup: cek status ke LinkQu (dipakai polling) */
         topupExecute: (partnerReff: string) =>
             request<any>('/api/wallet/topup/execute', {
                 method: 'POST',
@@ -643,15 +1005,14 @@ export const api = {
                 auth: true,
             }),
 
-        /** Topup: status dari database */
         topupStatus: (partnerReff: string) =>
             request<{
                 id: number;
                 user_id: string;
                 partner_reff: string;
                 method: 'va' | 'qris';
-                amount: number;      // total bayar
-                nominal: number;     // masuk saldo
+                amount: number;
+                nominal: number;
                 admin_fee: number;
                 bank_code: string | null;
                 va_number: string | null;
@@ -659,14 +1020,106 @@ export const api = {
                 status: 'PENDING' | 'SUCCESS' | 'FAILED';
                 expired_at: string | null;
                 created_at: string;
-            }>(`/api/wallet/topup/status/${partnerReff}`, { auth: true }),
+            }>(`/api/wallet/topup/status/${partnerReff}`, {
+                auth: true,
+            }),
+
+        withdrawInquiry: (input: {
+            amount: number;
+            bank_code: string;
+            account_number: string;
+        }) =>
+            request<any>('/api/wallet/withdraw/inquiry', {
+                method: 'POST',
+                body: input,
+                auth: true,
+            }),
+
+        withdrawExecute: (inquiryReff: string) =>
+            request<any>('/api/wallet/withdraw/execute', {
+                method: 'POST',
+                body: { inquiry_reff: inquiryReff },
+                auth: true,
+            }),
+
+        savedAccounts: () =>
+            request<
+                Array<{
+                    id: number;
+                    user_id: string;
+                    bank_code: string;
+                    account_number: string;
+                    account_name: string;
+                    created_at: string;
+                }>
+            >('/api/wallet/saved-accounts', { auth: true }),
+
+        saveAccount: (input: {
+            bank_code: string;
+            account_number: string;
+            account_name: string;
+        }) =>
+            request<any>('/api/wallet/saved-accounts', {
+                method: 'POST',
+                body: input,
+                auth: true,
+            }),
+
+        deleteAccount: (id: number) =>
+            request<null>(`/api/wallet/saved-accounts/${id}`, {
+                method: 'DELETE',
+                auth: true,
+            }),
+
+        topups: (limit = 20, offset = 0, status?: string) => {
+            const qs = new URLSearchParams({
+                limit: String(limit),
+                offset: String(offset),
+            });
+            if (status) qs.set('status', status);
+
+            return request<{
+                items: TopupItem[];
+                total: number;
+                limit: number;
+                offset: number;
+            }>(`/api/wallet/topups?${qs}`, { auth: true });
+        },
+
+        /** 🆕 History withdraw */
+        withdrawals: (limit = 20, offset = 0, status?: string) => {
+            const qs = new URLSearchParams({
+                limit: String(limit),
+                offset: String(offset),
+            });
+            if (status) qs.set('status', status);
+
+            return request<{
+                items: WithdrawalItem[];
+                total: number;
+                limit: number;
+                offset: number;
+            }>(`/api/wallet/withdrawals?${qs}`, { auth: true });
+        },
+
+        /** 🆕 History gabungan (topup + withdraw + order payment + refund) */
+        transactions: (limit = 20, offset = 0) =>
+            request<{
+                items: TransactionItem[];
+                limit: number;
+                offset: number;
+            }>(`/api/wallet/transactions?limit=${limit}&offset=${offset}`, {
+                auth: true,
+            }),
     },
 
-    // ===== Activity (notifikasi pintar) =====
-    // ⬅️ Komentar nyasar dihapus
+    // ===== Activity =====
     activity: {
         ping: () =>
-            request<null>('/api/activity/ping', { method: 'POST', auth: true }),
+            request<null>('/api/activity/ping', {
+                method: 'POST',
+                auth: true,
+            }),
 
         quote: (body: {
             service: 'ride' | 'send' | 'food';
@@ -688,3 +1141,8 @@ export const api = {
             }),
     },
 };
+
+// ============================================================
+// EXPORT TAMBAHAN
+// ============================================================
+export type { Tariff as TariffType };

@@ -1,6 +1,9 @@
+// components/ojek/LocationPreview.tsx
+import { mapStyle } from '@/constants/ojek-map-style';
 import { colors, MAP_DELTA } from '@/constants/ojek-theme';
 import { useNearbyDrivers } from '@/hooks/use-nearby-drivers';
 import type { UserLocationState } from '@/hooks/use-user-location';
+import { api, type PublicAsset } from '@/lib/api';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import React, { useEffect, useRef, useState } from 'react';
@@ -16,10 +19,23 @@ import {
 import MapView, { Marker } from 'react-native-maps';
 import { MAP_PROVIDER } from './parts';
 
-const VEHICLE_IMG = {
+// ============================================================
+// FALLBACK ASSETS (kalau backend kosong)
+// ============================================================
+const VEHICLE_IMG_FALLBACK = {
     motor: require('../../assets/images/motor-map.png'),
     mobil: require('@/assets/images/mobil-map.png'),
     motor_food: require('../../assets/images/motor-map.png'),
+};
+
+// ============================================================
+// KEY PREFIX untuk marker di backend
+// ============================================================
+const VEHICLE_KEY_PREFIX: Record<string, string> = {
+    motor: 'motor_map',
+    mobil: 'mobil_map',
+    motor_food: 'food_map',
+    // tambahkan mapping lain kalau ada
 };
 
 const MESSAGES: Record<string, { text: string; action?: string }> = {
@@ -44,11 +60,38 @@ const DEFAULT_REGION = {
     ...MAP_DELTA,
 };
 
-export function LocationPreview({ location }: { location: UserLocationState }) {
+// ============================================================
+// HELPER — cari asset berdasarkan prefix
+// ============================================================
+function findAssetByPrefix(
+    assets: PublicAsset[],
+    prefix: string
+): PublicAsset | undefined {
+    if (!assets || assets.length === 0) return undefined;
+
+    // 1. Exact match
+    const exact = assets.find((a) => a.key === prefix);
+    if (exact) return exact;
+
+    // 2. Prefix match (mis. "motor_map_1791964278640-xxx")
+    return assets.find((a) => a.key.startsWith(prefix + '_'));
+}
+
+// ============================================================
+// MAIN COMPONENT
+// ============================================================
+export function LocationPreview({
+    location,
+}: {
+    location: UserLocationState;
+}) {
     const { status, coords, refresh, openSettings } = location;
     const [enabling, setEnabling] = useState(false);
     const mapRef = useRef<MapView>(null);
     const autoZoomed = useRef(false);
+
+    // ✅ State: marker assets dari backend
+    const [markerAssets, setMarkerAssets] = useState<PublicAsset[]>([]);
 
     // Ambil driver online di sekitar (radius 3 km)
     const { drivers } = useNearbyDrivers(coords, {
@@ -56,6 +99,65 @@ export function LocationPreview({ location }: { location: UserLocationState }) {
         limit: 20,
         pollMs: 5000,
     });
+
+    // ============================================================
+    // ✅ Fetch marker assets dari backend (kategori: marker)
+    // ============================================================
+    useEffect(() => {
+        let alive = true;
+
+        (async () => {
+            try {
+                console.log('[LocationPreview] 🟡 fetch marker assets');
+
+                const res = await api.public.assets({
+                    category: 'marker',
+                    limit: 20,
+                });
+
+                console.log(
+                    '[LocationPreview] 🟢 marker assets:',
+                    res.items.length,
+                    res.items.map((a) => a.key)
+                );
+
+                if (!alive) return;
+                setMarkerAssets(res.items ?? []);
+            } catch (e: any) {
+                console.warn(
+                    '[LocationPreview] 🔴 fetch marker gagal:',
+                    e?.message
+                );
+            }
+        })();
+
+        return () => {
+            alive = false;
+        };
+    }, []);
+
+    // ============================================================
+    // ✅ Helper untuk ambil source marker berdasarkan vehicle_type
+    // ============================================================
+    const getMarkerSource = (vehicleType: string) => {
+        const prefix = VEHICLE_KEY_PREFIX[vehicleType];
+        if (!prefix) {
+            // vehicle type tidak dikenal → fallback ke motor
+            return VEHICLE_IMG_FALLBACK.motor;
+        }
+
+        const asset = findAssetByPrefix(markerAssets, prefix);
+        if (asset) {
+            return { uri: asset.url };
+        }
+
+        // fallback ke lokal
+        return (
+            VEHICLE_IMG_FALLBACK[
+            vehicleType as keyof typeof VEHICLE_IMG_FALLBACK
+            ] ?? VEHICLE_IMG_FALLBACK.motor
+        );
+    };
 
     // Log driver untuk debug
     useEffect(() => {
@@ -72,6 +174,19 @@ export function LocationPreview({ location }: { location: UserLocationState }) {
         });
         console.log('========================================');
     }, [drivers]);
+
+    // Log marker sources
+    useEffect(() => {
+        if (markerAssets.length === 0) return;
+        console.log('[LocationPreview] marker sources:');
+        Object.entries(VEHICLE_KEY_PREFIX).forEach(([vType, prefix]) => {
+            const asset = findAssetByPrefix(markerAssets, prefix);
+            console.log(
+                `  ${vType} (${prefix}):`,
+                asset ? '✅ ' + asset.url.substring(0, 60) : '⚠️ fallback'
+            );
+        });
+    }, [markerAssets]);
 
     // Animasi zoom-in saat coords pertama kali tersedia
     useEffect(() => {
@@ -116,6 +231,7 @@ export function LocationPreview({ location }: { location: UserLocationState }) {
                 <MapView
                     ref={mapRef}
                     style={StyleSheet.absoluteFill}
+                    customMapStyle={mapStyle}
                     provider={MAP_PROVIDER}
                     initialRegion={{
                         ...coords,
@@ -131,11 +247,15 @@ export function LocationPreview({ location }: { location: UserLocationState }) {
                     showsCompass={false}
                 >
                     {validDrivers.slice(0, 10).map((d) => {
+                        const markerSource = getMarkerSource(d.vehicle_type);
+
                         console.log(
                             '[LocationPreview] RENDER marker:',
                             d.name,
+                            d.vehicle_type,
                             d.coords
                         );
+
                         return (
                             <Marker
                                 key={d.id}
@@ -144,12 +264,12 @@ export function LocationPreview({ location }: { location: UserLocationState }) {
                                 tracksViewChanges={true}
                                 zIndex={5}
                             >
-                                <View style={s.driverMarker} collapsable={false}>
+                                <View
+                                    style={s.driverMarker}
+                                    collapsable={false}
+                                >
                                     <Image
-                                        source={
-                                            VEHICLE_IMG[d.vehicle_type] ??
-                                            VEHICLE_IMG.motor
-                                        }
+                                        source={markerSource}
                                         style={{ width: 28, height: 28 }}
                                         resizeMode="contain"
                                     />
@@ -188,7 +308,11 @@ export function LocationPreview({ location }: { location: UserLocationState }) {
     const m = MESSAGES[status] ?? MESSAGES.error;
     return (
         <View style={[s.box, s.center, { paddingHorizontal: 16 }]}>
-            <Ionicons name="location-outline" size={28} color={colors.secondary} />
+            <Ionicons
+                name="location-outline"
+                size={28}
+                color={colors.secondary}
+            />
             <Text style={s.hint}>{m.text}</Text>
             <Pressable
                 onPress={handleActionPress}
@@ -205,6 +329,9 @@ export function LocationPreview({ location }: { location: UserLocationState }) {
     );
 }
 
+// ============================================================
+// STYLES
+// ============================================================
 const s = StyleSheet.create({
     box: {
         height: 120,
@@ -245,9 +372,7 @@ const s = StyleSheet.create({
     driverMarker: {
         width: 40,
         height: 40,
-
         alignItems: 'center',
         justifyContent: 'center',
-
     },
 });

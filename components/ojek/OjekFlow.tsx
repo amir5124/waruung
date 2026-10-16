@@ -4,7 +4,7 @@ import { useOrder } from '@/contexts/OrderContext';
 import { useAppAlert } from '@/hooks/use-app-alert';
 import { SavedKind, useSavedAddresses } from '@/hooks/use-saved-addresses';
 import { useUserLocation } from '@/hooks/use-user-location';
-import { api, OrderResponse } from '@/lib/api';
+import { api, OrderResponse, type PublicAsset } from '@/lib/api';
 import { reverseGeocode, shortName } from '@/services/google-maps';
 import type { OrderPayload, PlaceLoc, ServiceType } from '@/types/ojek';
 import { router } from 'expo-router';
@@ -21,6 +21,9 @@ import SaveAddressStep from './SaveAddressStep';
 import SearchStep, { SearchField } from './SearchStep';
 import SearchingDriverStep from './SearchingDriverStep';
 
+// ============================================================
+// TYPES
+// ============================================================
 type Step =
     | 'home'
     | 'search'
@@ -43,6 +46,9 @@ type Props = {
 type LatLng = { latitude: number; longitude: number };
 type ApiDriver = NonNullable<OrderResponse['driver']>;
 
+// ============================================================
+// CONSTANTS
+// ============================================================
 const DEFAULT_LABEL: Record<SavedKind, string> = {
     home: 'Rumah',
     office: 'Kantor',
@@ -67,6 +73,9 @@ function buildDriver(d: ApiDriver, fallback: LatLng): Driver {
     };
 }
 
+// ============================================================
+// MAIN COMPONENT
+// ============================================================
 export default function OjekFlow({
     serviceType,
     userName,
@@ -84,13 +93,13 @@ export default function OjekFlow({
         setBootingOrderId,
         bootedOrderId,
         setBootedOrderId,
-        // ✅ Baru
-        pendingPaymentOrderId,
-        setPendingPaymentOrderId,
         bootingFromPayment,
         setBootingFromPayment,
     } = useOrder();
 
+    // ============================================================
+    // STATE
+    // ============================================================
     const [step, setStep] = useState<Step>('home');
     const [origin, setOrigin] = useState<PlaceLoc | null>(null);
     const [destination, setDestination] = useState<PlaceLoc | null>(null);
@@ -102,17 +111,65 @@ export default function OjekFlow({
     const [saveKind, setSaveKind] = useState<SavedKind>('home');
     const [saveMode, setSaveMode] = useState<'create' | 'edit'>('create');
     const [bootingFromNotif, setBootingFromNotif] = useState(false);
+
+    // ✅ BACKGROUND ASSETS dari backend (fetch SEKALI di parent)
+    const [bgAssets, setBgAssets] = useState<PublicAsset[]>([]);
+
+    // ============================================================
+    // REFS
+    // ============================================================
     const originEdited = useRef(false);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const pollTokenRef = useRef(0);
     const lastStatusRef = useRef<string | null>(null);
+    const inFlightRef = useRef(false);
+
     const stepRef = useRef<Step>('home');
     stepRef.current = step;
     const orderPayloadRef = useRef<OrderPayload | null>(null);
     orderPayloadRef.current = orderPayload;
+    const orderIdRef = useRef<number | null>(null);
+    orderIdRef.current = orderId;
 
     // ============================================================
-    // Asal otomatis = lokasi pengguna
+    // ✅ FETCH BG ASSETS — sekali di parent
+    // Data ini dipakai HomeStep untuk background motor/mobil
+    // ============================================================
+    useEffect(() => {
+        let alive = true;
+
+        (async () => {
+            try {
+                console.log('[OjekFlow] 🟡 fetch bg assets (parent)');
+
+                const res = await api.public.assets({
+                    category: 'other',
+                    limit: 50,
+                });
+
+                console.log(
+                    '[OjekFlow] 🟢 bg assets:',
+                    res.items.length,
+                    res.items.map((a) => a.key)
+                );
+
+                if (!alive) return;
+                setBgAssets(res.items ?? []);
+            } catch (e: any) {
+                console.warn(
+                    '[OjekFlow] 🔴 fetch bg gagal:',
+                    e?.message
+                );
+            }
+        })();
+
+        return () => {
+            alive = false;
+        };
+    }, []);
+
+    // ============================================================
+    // ASAL OTOMATIS = LOKASI PENGGUNA
     // ============================================================
     useEffect(() => {
         if (bootingFromNotif) return;
@@ -144,15 +201,10 @@ export default function OjekFlow({
     }, [user.coords, bootingFromNotif, orderId]);
 
     // ============================================================
-    // ✅ BOOT dari notif / setelah payment paid
-    // ============================================================
-    // components/ojek/OjekFlow.tsx
-
-    // ============================================================
-    // ✅ BOOT — HANYA dari activeOrderId (notif / payment paid)
+    // BOOT: hanya dari activeOrderId (notif / payment paid)
     // ============================================================
     useEffect(() => {
-        const bootOrderId = activeOrderId;   // ⬅️ HANYA activeOrderId
+        const bootOrderId = activeOrderId;
         if (!bootOrderId) return;
 
         if (bootedOrderId === bootOrderId) return;
@@ -182,7 +234,7 @@ export default function OjekFlow({
                 const dropoffCoords = order.dropoff_coords ?? FALLBACK_COORDS;
 
                 const payload: OrderPayload = {
-                    service: 'motor',
+                    service: serviceType,
                     optionId: order.tariff_code ?? '',
                     optionName: order.option_name ?? '',
                     price: order.total_fare ?? 0,
@@ -212,9 +264,7 @@ export default function OjekFlow({
                     setDriver(buildDriver(order.driver, pickupCoords));
                 }
 
-                // ═══════════════════════════════════════════════════
                 // CASE 1: QRIS/VA masih pending → redirect ke /payment
-                // ═══════════════════════════════════════════════════
                 const needsPayment =
                     (order.payment_method === 'qris' ||
                         order.payment_method === 'bank_transfer') &&
@@ -237,9 +287,7 @@ export default function OjekFlow({
                     return;
                 }
 
-                // ═══════════════════════════════════════════════════
-                // CASE 2: Payment paid + status pending → searching
-                // ═══════════════════════════════════════════════════
+                // CASE 2: Payment paid/cash/wallet + status pending → searching
                 const canSearch =
                     order.status === 'pending' &&
                     (order.payment_status === 'paid' ||
@@ -247,9 +295,7 @@ export default function OjekFlow({
                         order.payment_method === 'wallet');
 
                 if (canSearch) {
-                    console.log(
-                        '[OJEKFLOW] Payment paid/cash → step searching'
-                    );
+                    console.log('[OJEKFLOW] Payment paid/cash → step searching');
                     setStep('searching');
                     startPolling(bootOrderId);
 
@@ -275,10 +321,12 @@ export default function OjekFlow({
                         setStep('summary');
                         break;
                     case 'cancelled':
+                    default:
+                        setOrderId(null);
+                        setOrderPayload(null);
+                        setDriver(null);
                         setStep('home');
                         break;
-                    default:
-                        setStep('home');
                 }
 
                 setBootingFromPayment(false);
@@ -291,6 +339,10 @@ export default function OjekFlow({
                     'Gagal Buka Order',
                     err.message || 'Coba buka manual.'
                 );
+
+                setBootedOrderId(bootOrderId);
+                setActiveOrder(null);
+
                 setBootingFromNotif(false);
                 setBootingOrderId(null);
                 setBootingFromPayment(false);
@@ -299,16 +351,10 @@ export default function OjekFlow({
 
         boot();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [
-        activeOrderId,          // ⬅️ HANYA ini
-        bootedOrderId,
-        bootingOrderId,
-        bootingFromPayment,
-        // ❌ HAPUS: pendingPaymentOrderId
-    ]);
+    }, [activeOrderId, bootedOrderId, bootingOrderId, bootingFromPayment]);
 
     // ============================================================
-    // Clear activeOrderId setelah boot
+    // CLEAR activeOrderId setelah boot
     // ============================================================
     useEffect(() => {
         if (bootingFromNotif) return;
@@ -322,7 +368,7 @@ export default function OjekFlow({
     }, [bootingFromNotif, activeOrderId, setActiveOrder]);
 
     // ============================================================
-    // Reset bootedOrderId setelah 30 detik
+    // RESET bootedOrderId setelah 30 detik
     // ============================================================
     useEffect(() => {
         if (!bootedOrderId) return;
@@ -332,9 +378,32 @@ export default function OjekFlow({
         return () => clearTimeout(t);
     }, [bootedOrderId, setBootedOrderId]);
 
-    // ---- Polling ----
+    // ============================================================
+    // PENGAMAN: kalau data step belum lengkap → kembali ke home
+    // ============================================================
+    useEffect(() => {
+        if (bootingFromNotif) return;
+
+        const missing =
+            (step === 'order' && !(origin && destination)) ||
+            (['searching', 'driverFound', 'onTrip', 'summary'].includes(step) &&
+                !orderPayload) ||
+            (['driverFound', 'onTrip', 'summary'].includes(step) && !driver);
+
+        if (missing) {
+            console.warn('[OJEKFLOW] Data step', step, 'belum lengkap → home');
+            stopPolling();
+            setStep('home');
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [step, origin, destination, orderPayload, driver, bootingFromNotif]);
+
+    // ============================================================
+    // POLLING
+    // ============================================================
     const stopPolling = () => {
         pollTokenRef.current += 1;
+        inFlightRef.current = false;
         if (pollRef.current) {
             clearInterval(pollRef.current);
             pollRef.current = null;
@@ -347,6 +416,9 @@ export default function OjekFlow({
         const token = pollTokenRef.current;
 
         pollRef.current = setInterval(async () => {
+            if (inFlightRef.current) return;
+            inFlightRef.current = true;
+
             try {
                 const order = await api.getOrder(id);
                 if (token !== pollTokenRef.current) return;
@@ -361,8 +433,7 @@ export default function OjekFlow({
                 if (order.driver) {
                     const d = order.driver;
                     const fallback =
-                        orderPayloadRef.current?.origin.coords ??
-                        FALLBACK_COORDS;
+                        orderPayloadRef.current?.origin.coords ?? FALLBACK_COORDS;
 
                     setDriver((prev) => {
                         if (!prev || prev.id !== d.id) {
@@ -419,13 +490,52 @@ export default function OjekFlow({
                 }
             } catch (err: any) {
                 console.warn('Polling error:', err.message);
+            } finally {
+                if (token === pollTokenRef.current) inFlightRef.current = false;
             }
         }, POLL_INTERVAL);
     };
 
     useEffect(() => () => stopPolling(), []);
 
-    // ---- Batalkan ----
+    // ============================================================
+    // BATALKAN order saat masih mencari driver
+    // ============================================================
+    const doCancelSearching = async () => {
+        const id = orderIdRef.current;
+        stopPolling();
+        if (id) {
+            try {
+                await api.updateOrderStatus(
+                    id,
+                    'cancelled',
+                    'Dibatalkan oleh customer'
+                );
+            } catch (err: any) {
+                console.warn('Gagal batalkan order:', err.message);
+            }
+        }
+        setOrderId(null);
+        setDriver(null);
+        setStep('order');
+    };
+
+    const cancelSearching = () => {
+        showAlert(
+            'Batalkan pencarian?',
+            'Pesananmu akan dibatalkan dan kamu kembali ke halaman pesan.',
+            [
+                { text: 'Tidak', style: 'cancel' },
+                {
+                    text: 'Ya, batalkan',
+                    style: 'destructive',
+                    onPress: doCancelSearching,
+                },
+            ]
+        );
+    };
+
+    // ---- Batalkan (driver sudah dalam perjalanan) ----
     const confirmCancel = () => {
         showAlert(
             'Batalkan pesanan?',
@@ -436,10 +546,11 @@ export default function OjekFlow({
                     text: 'Ya, batalkan',
                     style: 'destructive',
                     onPress: async () => {
-                        if (orderId) {
+                        const id = orderIdRef.current;
+                        if (id) {
                             try {
                                 await api.updateOrderStatus(
-                                    orderId,
+                                    id,
                                     'cancelled',
                                     'Dibatalkan oleh customer'
                                 );
@@ -460,7 +571,14 @@ export default function OjekFlow({
         );
     };
 
-    // ---- Back handler ----
+    const confirmCancelRef = useRef(confirmCancel);
+    confirmCancelRef.current = confirmCancel;
+    const cancelSearchingRef = useRef(cancelSearching);
+    cancelSearchingRef.current = cancelSearching;
+
+    // ============================================================
+    // BACK HANDLER
+    // ============================================================
     useEffect(() => {
         const back: Record<Step, Step | null> = {
             home: null,
@@ -468,29 +586,33 @@ export default function OjekFlow({
             pickup: 'search',
             pickDestination: 'search',
             order: 'pickup',
-            searching: 'order',
+            searching: null,
             driverFound: null,
             onTrip: null,
             summary: null,
             saveAddress: 'home',
         };
-        const sub = BackHandler.addEventListener(
-            'hardwareBackPress',
-            () => {
-                if (step === 'driverFound') {
-                    confirmCancel();
-                    return true;
-                }
-                if (step === 'onTrip' || step === 'summary') return true;
-                const prev = back[step];
-                if (prev) setStep(prev);
-                else onExit();
+        const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+            if (step === 'searching') {
+                cancelSearchingRef.current();
                 return true;
             }
-        );
+            if (step === 'driverFound') {
+                confirmCancelRef.current();
+                return true;
+            }
+            if (step === 'onTrip' || step === 'summary') return true;
+            const prev = back[step];
+            if (prev) setStep(prev);
+            else onExit();
+            return true;
+        });
         return () => sub.remove();
     }, [step, onExit]);
 
+    // ============================================================
+    // HANDLER
+    // ============================================================
     const openSearch = (f: SearchField) => {
         setFocusField(f);
         setStep('search');
@@ -537,10 +659,8 @@ export default function OjekFlow({
     };
 
     // ============================================================
-    // ✅ HANDLE ORDER — cek payment SEBELUM setStep
+    // HANDLE ORDER
     // ============================================================
-    // components/ojek/OjekFlow.tsx
-
     const handleOrder = async (p: OrderPayload) => {
         setOrderPayload(p);
         setOrderStatus('pending');
@@ -582,11 +702,7 @@ export default function OjekFlow({
                 console.log(
                     '[OJEKFLOW] Payment pending → redirect ke /payment'
                 );
-
                 setStep('order');
-
-                // ✅ JANGAN set activeOrder / pendingPaymentOrderId
-                //    Cukup redirect — biar payment screen yang trigger boot nanti
 
                 router.push({
                     pathname: '/payment/[orderId]',
@@ -595,7 +711,6 @@ export default function OjekFlow({
                 return;
             }
 
-            // Cash / Wallet → langsung searching
             console.log(
                 '[OJEKFLOW] Payment paid/cash → start searching driver'
             );
@@ -606,8 +721,9 @@ export default function OjekFlow({
             setStep('order');
         }
     };
+
     // ============================================================
-    // Loading saat boot
+    // LOADING SAAT BOOT
     // ============================================================
     if (bootingFromNotif) {
         return (
@@ -625,6 +741,9 @@ export default function OjekFlow({
         );
     }
 
+    // ============================================================
+    // RENDER STEP
+    // ============================================================
     let content: React.ReactNode = null;
 
     if (step === 'home') {
@@ -635,6 +754,7 @@ export default function OjekFlow({
                 location={user}
                 savedHome={saved.home}
                 savedOffice={saved.office}
+                bgAssets={bgAssets}                // ✅ PASS KE HOMESTEP
                 onBack={onExit}
                 onPressSearch={() => openSearch('destination')}
                 onPressSaved={(kind: SavedKind) => {
@@ -660,8 +780,7 @@ export default function OjekFlow({
                 name: shortName(existing.address),
             }
             : {
-                coords:
-                    origin?.coords ?? user.coords ?? FALLBACK_COORDS,
+                coords: origin?.coords ?? user.coords ?? FALLBACK_COORDS,
                 address: origin?.address ?? '',
                 name: origin?.name ?? '',
             };
@@ -710,9 +829,7 @@ export default function OjekFlow({
                 }}
                 onPickOnMap={(f: SearchField) =>
                     setStep(
-                        f === 'destination'
-                            ? 'pickDestination'
-                            : 'pickup'
+                        f === 'destination' ? 'pickDestination' : 'pickup'
                     )
                 }
             />
@@ -741,8 +858,7 @@ export default function OjekFlow({
     }
 
     if (step === 'pickup') {
-        const fallback =
-            destination?.coords ?? user.coords ?? FALLBACK_COORDS;
+        const fallback = destination?.coords ?? user.coords ?? FALLBACK_COORDS;
         const initial: PlaceLoc = origin ?? {
             name: '',
             address: '',
@@ -755,10 +871,7 @@ export default function OjekFlow({
                 initial={initial}
                 userLocation={
                     user.coords
-                        ? {
-                            coords: user.coords,
-                            accuracy: user.accuracy,
-                        }
+                        ? { coords: user.coords, accuracy: user.accuracy }
                         : null
                 }
                 onBack={() => setStep('search')}
@@ -790,11 +903,7 @@ export default function OjekFlow({
         content = (
             <SearchingDriverStep
                 payload={orderPayload}
-                onBack={() => {
-                    stopPolling();
-                    setOrderId(null);
-                    setStep('order');
-                }}
+                onBack={cancelSearching}
                 searchDelayMs={999_999}
                 onDriverFound={() => { }}
             />
@@ -839,10 +948,7 @@ export default function OjekFlow({
                                 comment: message,
                                 tags,
                             });
-                            console.log(
-                                '[OJEKFLOW] Rating tersimpan:',
-                                res
-                            );
+                            console.log('[OJEKFLOW] Rating tersimpan:', res);
                         } catch (err: any) {
                             console.warn(
                                 '[OJEKFLOW] Gagal simpan rating:',

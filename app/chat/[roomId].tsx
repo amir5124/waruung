@@ -1,3 +1,4 @@
+// app/chat/[roomId].tsx
 import { colors } from '@/constants/ojek-theme';
 import { api, ChatMessage, getToken } from '@/lib/api';
 import { supabase } from '@/lib/supabase-client';
@@ -8,6 +9,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     AppState,
+    Dimensions,
     FlatList,
     Image,
     KeyboardAvoidingView,
@@ -21,7 +23,10 @@ import {
     TouchableWithoutFeedback,
     View,
 } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+    SafeAreaView,
+    useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 
 const COLORS = {
     primary: colors.primary,
@@ -29,6 +34,14 @@ const COLORS = {
     textMuted: colors.textMuted,
     border: colors.border,
 };
+
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+
+const fmtTime = (ms: number) =>
+    new Date(ms).toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit',
+    });
 
 export default function ChatScreen() {
     const insets = useSafeAreaInsets();
@@ -48,7 +61,33 @@ export default function ChatScreen() {
     const myIdRef = useRef<string | null>(null);
     const roomIdNum = Number(roomId);
 
-    // ========== Alert bottom sheet ==========
+    // ============================================================
+    // ✅ FULLSCREEN IMAGE VIEWER
+    // ============================================================
+    const [viewerVisible, setViewerVisible] = useState(false);
+    const [viewerUri, setViewerUri] = useState<string | null>(null);
+
+    const openImageViewer = (uri: string) => {
+        console.log('[chat] Open image viewer:', uri);
+        setViewerUri(uri);
+        setViewerVisible(true);
+    };
+
+    const closeImageViewer = () => {
+        setViewerVisible(false);
+        // delay clear uri supaya tidak flicker saat closing
+        setTimeout(() => setViewerUri(null), 300);
+    };
+
+    // Jendela chat (ditutup 30 menit setelah pesanan selesai)
+    const [closesAt, setClosesAt] = useState<number | null>(null);
+    const [chatClosed, setChatClosed] = useState(false);
+
+    const markClosedIfNeeded = (message?: string) => {
+        if (message && /ditutup/i.test(message)) setChatClosed(true);
+    };
+
+    // Alert bottom sheet
     const [alertVisible, setAlertVisible] = useState(false);
     const [alertTitle, setAlertTitle] = useState('');
     const [alertMessage, setAlertMessage] = useState('');
@@ -65,7 +104,10 @@ export default function ChatScreen() {
         setAlertMessage(message);
         setAlertActionLabel(actionLabel ?? 'Mengerti');
         setAlertAction(() => onAction ?? null);
-        setTimeout(() => setAlertVisible(true), Platform.OS === 'ios' ? 300 : 0);
+        setTimeout(
+            () => setAlertVisible(true),
+            Platform.OS === 'ios' ? 300 : 0
+        );
     };
 
     const closeAlert = () => {
@@ -73,13 +115,11 @@ export default function ChatScreen() {
         setAlertAction(null);
     };
 
-    // Simpan myId ke ref supaya tidak trigger re-subscribe
     useEffect(() => {
         myIdRef.current = myId;
         console.log('[chat] myId updated:', myId);
     }, [myId]);
 
-    // Log setiap kali messages berubah
     useEffect(() => {
         console.log(
             '[chat] messages state updated: count =',
@@ -89,7 +129,6 @@ export default function ChatScreen() {
         );
     }, [messages]);
 
-    // Ambil user id dari token
     useEffect(() => {
         (async () => {
             try {
@@ -107,7 +146,40 @@ export default function ChatScreen() {
         })();
     }, []);
 
-    // Ambil ulang semua pesan (dipakai saat reconnect / app kembali aktif)
+    useEffect(() => {
+        let alive = true;
+        (async () => {
+            try {
+                const st = await api.chat.roomStatus(roomIdNum);
+                if (!alive) return;
+                setClosesAt(
+                    st.chat_closes_at
+                        ? new Date(st.chat_closes_at).getTime()
+                        : null
+                );
+                setChatClosed(!st.chat_open);
+            } catch (err: any) {
+                console.warn(
+                    '[chat] gagal ambil status room:',
+                    err.message
+                );
+            }
+        })();
+        return () => {
+            alive = false;
+        };
+    }, [roomIdNum]);
+
+    useEffect(() => {
+        if (closesAt === null || chatClosed) return;
+        const check = () => {
+            if (Date.now() >= closesAt) setChatClosed(true);
+        };
+        check();
+        const t = setInterval(check, 15000);
+        return () => clearInterval(t);
+    }, [closesAt, chatClosed]);
+
     const refetchMessages = async () => {
         try {
             const data = await api.chat.listMessages(roomIdNum);
@@ -118,7 +190,6 @@ export default function ChatScreen() {
         }
     };
 
-    // Load pesan awal — dengan timeout
     useEffect(() => {
         let alive = true;
         (async () => {
@@ -127,7 +198,10 @@ export default function ChatScreen() {
 
             try {
                 const timeoutPromise = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('Timeout 10s')), 10000)
+                    setTimeout(
+                        () => reject(new Error('Timeout 10s')),
+                        10000
+                    )
                 );
 
                 const data = (await Promise.race([
@@ -141,10 +215,16 @@ export default function ChatScreen() {
                 setMessages(data);
 
                 api.chat.markRead(roomIdNum).catch((err) => {
-                    console.warn('[chat] markRead gagal:', err.message);
+                    console.warn(
+                        '[chat] markRead gagal:',
+                        err.message
+                    );
                 });
             } catch (err: any) {
-                console.error('[chat] GAGAL LOAD:', err.message);
+                console.error(
+                    '[chat] GAGAL LOAD:',
+                    err.message
+                );
             } finally {
                 if (alive) setLoading(false);
             }
@@ -155,29 +235,41 @@ export default function ChatScreen() {
         };
     }, [roomIdNum]);
 
-    // Subscribe Supabase Realtime (Broadcast dari backend)
     useEffect(() => {
         console.log('[chat] === SUBSCRIBE REALTIME (broadcast) ===');
         let firstSubscribe = true;
 
         const channel = supabase
             .channel(`chat:${roomIdNum}`)
-            .on('broadcast', { event: 'new_message' }, ({ payload }) => {
-                const newMsg = payload as ChatMessage;
-                console.log('[chat] 🔔 Broadcast pesan baru:', newMsg.id, newMsg.message_type);
+            .on(
+                'broadcast',
+                { event: 'new_message' },
+                ({ payload }) => {
+                    const newMsg = payload as ChatMessage;
+                    console.log(
+                        '[chat] 🔔 Broadcast pesan baru:',
+                        newMsg.id,
+                        newMsg.message_type
+                    );
 
-                setMessages((prev) =>
-                    prev.some((m) => m.id === newMsg.id) ? prev : [...prev, newMsg]
+                    setMessages((prev) =>
+                        prev.some((m) => m.id === newMsg.id)
+                            ? prev
+                            : [...prev, newMsg]
+                    );
+
+                    if (newMsg.sender_id !== myIdRef.current) {
+                        api.chat.markRead(roomIdNum).catch(() => { });
+                    }
+                }
+            )
+            .subscribe((status, err) => {
+                console.log(
+                    '[chat] Realtime status:',
+                    status,
+                    err ?? ''
                 );
 
-                if (newMsg.sender_id !== myIdRef.current) {
-                    api.chat.markRead(roomIdNum).catch(() => { });
-                }
-            })
-            .subscribe((status, err) => {
-                console.log('[chat] Realtime status:', status, err ?? '');
-
-                // Setelah reconnect, ambil ulang pesan yang mungkin terlewat
                 if (status === 'SUBSCRIBED') {
                     if (firstSubscribe) {
                         firstSubscribe = false;
@@ -198,7 +290,6 @@ export default function ChatScreen() {
         };
     }, [roomIdNum]);
 
-    // Refetch saat app kembali ke foreground (Broadcast tidak menyimpan pesan yang terlewat)
     useEffect(() => {
         const sub = AppState.addEventListener('change', (state) => {
             if (state === 'active') refetchMessages();
@@ -206,17 +297,19 @@ export default function ChatScreen() {
         return () => sub.remove();
     }, [roomIdNum]);
 
-    // Auto-scroll ke bawah saat pesan baru
     useEffect(() => {
         if (messages.length > 0) {
-            setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+            setTimeout(
+                () =>
+                    listRef.current?.scrollToEnd({ animated: true }),
+                100
+            );
         }
     }, [messages.length]);
 
-    // ========== Kirim Teks ==========
     const handleSend = async () => {
         const text = input.trim();
-        if (!text || sending) return;
+        if (!text || sending || chatClosed) return;
 
         setInput('');
         setSending(true);
@@ -232,48 +325,54 @@ export default function ChatScreen() {
         } catch (err: any) {
             console.error('[chat] Gagal kirim:', err.message);
             setInput(text);
+            markClosedIfNeeded(err.message);
             showAlert('Gagal Kirim', err.message || 'Coba lagi.');
         } finally {
             setSending(false);
         }
     };
 
-    // ========== Pilih dari Galeri ==========
     const handlePickFromLibrary = async () => {
         try {
-            const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+            const perm =
+                await ImagePicker.requestMediaLibraryPermissionsAsync();
             if (!perm.granted) {
                 showAlert(
                     'Izin dibutuhkan',
                     'Aktifkan akses galeri untuk kirim foto.',
                     'Buka Pengaturan',
-                    () => {
-                        // Bisa tambah Linking.openSettings() kalau perlu
-                    }
+                    () => { }
                 );
                 return;
             }
 
-            const result = await ImagePicker.launchImageLibraryAsync({
-                mediaTypes: ['images'],
-                allowsEditing: false,
-                quality: 0.8,
-                exif: false,
-            });
+            const result =
+                await ImagePicker.launchImageLibraryAsync({
+                    mediaTypes: ['images'],
+                    allowsEditing: false,
+                    quality: 0.8,
+                    exif: false,
+                });
 
             if (result.canceled || !result.assets?.length) return;
 
             await uploadImage(result.assets[0]);
         } catch (err: any) {
-            console.error('[chat] Gagal buka galeri:', err.message);
-            showAlert('Gagal', err.message || 'Tidak bisa buka galeri.');
+            console.error(
+                '[chat] Gagal buka galeri:',
+                err.message
+            );
+            showAlert(
+                'Gagal',
+                err.message || 'Tidak bisa buka galeri.'
+            );
         }
     };
 
-    // ========== Ambil dari Kamera ==========
     const handlePickFromCamera = async () => {
         try {
-            const perm = await ImagePicker.requestCameraPermissionsAsync();
+            const perm =
+                await ImagePicker.requestCameraPermissionsAsync();
             if (!perm.granted) {
                 showAlert(
                     'Izin dibutuhkan',
@@ -294,13 +393,20 @@ export default function ChatScreen() {
 
             await uploadImage(result.assets[0]);
         } catch (err: any) {
-            console.error('[chat] Gagal buka kamera:', err.message);
-            showAlert('Gagal', err.message || 'Tidak bisa buka kamera.');
+            console.error(
+                '[chat] Gagal buka kamera:',
+                err.message
+            );
+            showAlert(
+                'Gagal',
+                err.message || 'Tidak bisa buka kamera.'
+            );
         }
     };
 
-    // ========== Upload Gambar ke Backend ==========
-    const uploadImage = async (asset: ImagePicker.ImagePickerAsset) => {
+    const uploadImage = async (
+        asset: ImagePicker.ImagePickerAsset
+    ) => {
         console.log('[chat] === UPLOAD IMAGE ===');
         console.log('[chat] uri:', asset.uri);
         console.log('[chat] mimeType:', asset.mimeType);
@@ -324,13 +430,16 @@ export default function ChatScreen() {
             });
         } catch (err: any) {
             console.error('[chat] Upload gagal:', err.message);
-            showAlert('Gagal Kirim Foto', err.message || 'Coba lagi.');
+            markClosedIfNeeded(err.message);
+            showAlert(
+                'Gagal Kirim Foto',
+                err.message || 'Coba lagi.'
+            );
         } finally {
             setUploading(false);
         }
     };
 
-    // ========== Modal Pilih Sumber Foto ==========
     const [sourceModalVisible, setSourceModalVisible] = useState(false);
 
     const openSourcePicker = () => {
@@ -347,13 +456,21 @@ export default function ChatScreen() {
         setTimeout(() => handlePickFromCamera(), 250);
     };
 
-    // ========== Render Item ==========
+    // ============================================================
+    // ✅ RENDER ITEM — dengan onPress buka fullscreen
+    // ============================================================
     const renderItem = ({ item }: { item: ChatMessage }) => {
         const mine = item.sender_id === myId;
-        const isImage = item.message_type === 'image' && !!item.attachment_url;
+        const isImage =
+            item.message_type === 'image' && !!item.attachment_url;
 
         return (
-            <View style={[s.msgRow, mine ? s.msgRowMine : s.msgRowTheirs]}>
+            <View
+                style={[
+                    s.msgRow,
+                    mine ? s.msgRowMine : s.msgRowTheirs,
+                ]}
+            >
                 <View
                     style={[
                         s.bubble,
@@ -362,28 +479,55 @@ export default function ChatScreen() {
                     ]}
                 >
                     {isImage ? (
-                        <View>
+                        // ✅ Pressable untuk buka fullscreen
+                        <Pressable
+                            onPress={() =>
+                                openImageViewer(
+                                    item.attachment_url!
+                                )
+                            }
+                            style={s.imagePressable}
+                        >
                             <Image
-                                source={{ uri: item.attachment_url! }}
+                                source={{
+                                    uri: item.attachment_url!,
+                                }}
                                 style={s.imageMsg}
                                 resizeMode="cover"
                             />
                             <View style={s.imageTimeWrap}>
                                 <Text style={s.imageTime}>
-                                    {new Date(item.created_at).toLocaleTimeString('id-ID', {
-                                        hour: '2-digit',
-                                        minute: '2-digit',
-                                    })}
+                                    {new Date(
+                                        item.created_at
+                                    ).toLocaleTimeString(
+                                        'id-ID',
+                                        {
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                        }
+                                    )}
                                 </Text>
                             </View>
-                        </View>
+                        </Pressable>
                     ) : (
                         <>
-                            <Text style={[s.msgText, mine && { color: '#fff' }]}>
+                            <Text
+                                style={[
+                                    s.msgText,
+                                    mine && { color: '#fff' },
+                                ]}
+                            >
                                 {item.message}
                             </Text>
-                            <Text style={[s.msgTime, mine && { color: '#d0e8f8' }]}>
-                                {new Date(item.created_at).toLocaleTimeString('id-ID', {
+                            <Text
+                                style={[
+                                    s.msgTime,
+                                    mine && { color: '#d0e8f8' },
+                                ]}
+                            >
+                                {new Date(
+                                    item.created_at
+                                ).toLocaleTimeString('id-ID', {
                                     hour: '2-digit',
                                     minute: '2-digit',
                                 })}
@@ -395,19 +539,44 @@ export default function ChatScreen() {
         );
     };
 
+    const headerSubText = loading
+        ? 'Memuat...'
+        : chatClosed
+            ? 'Chat ditutup'
+            : closesAt !== null
+                ? `Chat dibuka sampai ${fmtTime(closesAt)}`
+                : `${messages.length} pesan`;
+
     return (
-        <SafeAreaView style={s.container} edges={['top', 'bottom']}>
+        <SafeAreaView
+            style={s.container}
+            edges={['top', 'bottom']}
+        >
             {/* Header */}
             <View style={s.header}>
-                <Pressable onPress={() => router.back()} style={s.backBtn}>
-                    <Ionicons name="arrow-back" size={22} color={colors.text} />
+                <Pressable
+                    onPress={() => router.back()}
+                    style={s.backBtn}
+                >
+                    <Ionicons
+                        name="arrow-back"
+                        size={22}
+                        color={colors.text}
+                    />
                 </Pressable>
                 <View style={{ flex: 1 }}>
                     <Text style={s.headerTitle} numberOfLines={1}>
                         {peerName ?? 'Chat'}
                     </Text>
-                    <Text style={s.headerSub}>
-                        {loading ? 'Memuat...' : `${messages.length} pesan`}
+                    <Text
+                        style={[
+                            s.headerSub,
+                            chatClosed && {
+                                color: colors.textMuted,
+                            },
+                        ]}
+                    >
+                        {headerSubText}
                     </Text>
                 </View>
             </View>
@@ -415,12 +584,16 @@ export default function ChatScreen() {
             {/* Messages + Input */}
             <KeyboardAvoidingView
                 style={{ flex: 1 }}
-                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                behavior={
+                    Platform.OS === 'ios' ? 'padding' : 'height'
+                }
             >
                 {loading ? (
                     <View style={s.loadingWrap}>
                         <ActivityIndicator color={colors.primary} />
-                        <Text style={s.loadingText}>Memuat pesan...</Text>
+                        <Text style={s.loadingText}>
+                            Memuat pesan...
+                        </Text>
                     </View>
                 ) : messages.length === 0 ? (
                     <View style={s.emptyWrap}>
@@ -430,7 +603,9 @@ export default function ChatScreen() {
                             color={colors.textMuted}
                         />
                         <Text style={s.emptyText}>
-                            Belum ada pesan. Mulai percakapan!
+                            {chatClosed
+                                ? 'Chat sudah ditutup.'
+                                : 'Belum ada pesan. Mulai percakapan!'}
                         </Text>
                     </View>
                 ) : (
@@ -449,59 +624,145 @@ export default function ChatScreen() {
                     />
                 )}
 
-                {/* Input bar */}
-                <View
-                    style={[
-                        s.inputBar,
-                        { paddingBottom: insets.bottom > 0 ? insets.bottom : 12 },
-                    ]}
-                >
-                    <Pressable
-                        onPress={openSourcePicker}
-                        disabled={uploading}
-                        style={[s.iconBtn, uploading && { opacity: 0.5 }]}
+                {chatClosed ? (
+                    <View
+                        style={[
+                            s.closedBar,
+                            {
+                                paddingBottom:
+                                    insets.bottom > 0
+                                        ? insets.bottom
+                                        : 12,
+                            },
+                        ]}
                     >
-                        {uploading ? (
-                            <ActivityIndicator size="small" color={colors.primary} />
-                        ) : (
-                            <Ionicons
-                                name="camera-outline"
-                                size={22}
-                                color={colors.primary}
+                        <Ionicons
+                            name="lock-closed-outline"
+                            size={18}
+                            color={colors.textMuted}
+                        />
+                        <Text style={s.closedText}>
+                            Chat sudah ditutup karena pesanan
+                            telah selesai.
+                        </Text>
+                    </View>
+                ) : (
+                    <View
+                        style={[
+                            s.inputBar,
+                            {
+                                paddingBottom:
+                                    insets.bottom > 0
+                                        ? insets.bottom
+                                        : 12,
+                            },
+                        ]}
+                    >
+                        <Pressable
+                            onPress={openSourcePicker}
+                            disabled={uploading}
+                            style={[
+                                s.iconBtn,
+                                uploading && { opacity: 0.5 },
+                            ]}
+                        >
+                            {uploading ? (
+                                <ActivityIndicator
+                                    size="small"
+                                    color={colors.primary}
+                                />
+                            ) : (
+                                <Ionicons
+                                    name="camera-outline"
+                                    size={22}
+                                    color={colors.primary}
+                                />
+                            )}
+                        </Pressable>
+
+                        <TextInput
+                            value={input}
+                            onChangeText={setInput}
+                            placeholder="Tulis pesan..."
+                            placeholderTextColor={
+                                colors.textMuted
+                            }
+                            style={s.input}
+                            multiline
+                            maxLength={500}
+                        />
+
+                        {input.trim() ? (
+                            <Pressable
+                                onPress={handleSend}
+                                disabled={sending}
+                                style={[
+                                    s.sendBtn,
+                                    sending && { opacity: 0.5 },
+                                ]}
+                            >
+                                {sending ? (
+                                    <ActivityIndicator
+                                        size="small"
+                                        color="#fff"
+                                    />
+                                ) : (
+                                    <Ionicons
+                                        name="send"
+                                        size={20}
+                                        color="#fff"
+                                    />
+                                )}
+                            </Pressable>
+                        ) : null}
+                    </View>
+                )}
+            </KeyboardAvoidingView>
+
+            {/* ============================================================ */}
+            {/* ✅ FULLSCREEN IMAGE VIEWER                                   */}
+            {/* ============================================================ */}
+            <Modal
+                visible={viewerVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={closeImageViewer}
+                statusBarTranslucent
+            >
+                <View style={styles.viewerOverlay}>
+                    {/* Tombol close (pojok kanan atas) */}
+                    <TouchableOpacity
+                        style={[
+                            styles.viewerClose,
+                            { top: insets.top + 16 },
+                        ]}
+                        onPress={closeImageViewer}
+                        hitSlop={12}
+                    >
+                        <Ionicons
+                            name="close"
+                            size={28}
+                            color="#fff"
+                        />
+                    </TouchableOpacity>
+
+                    {/* Tap di mana saja untuk tutup */}
+                    <Pressable
+                        style={styles.viewerContent}
+                        onPress={closeImageViewer}
+                    >
+                        {viewerUri && (
+                            <Image
+                                source={{ uri: viewerUri }}
+                                style={styles.viewerImage}
+                                resizeMode="contain"
                             />
                         )}
                     </Pressable>
-
-                    <TextInput
-                        value={input}
-                        onChangeText={setInput}
-                        placeholder="Tulis pesan..."
-                        placeholderTextColor={colors.textMuted}
-                        style={s.input}
-                        multiline
-                        maxLength={500}
-                    />
-
-                    {input.trim() ? (
-                        <Pressable
-                            onPress={handleSend}
-                            disabled={sending}
-                            style={[
-                                s.sendBtn,
-                                sending && { opacity: 0.5 },
-                            ]}
-                        >
-                            {sending ? (
-                                <ActivityIndicator size="small" color="#fff" />
-                            ) : (
-                                <Ionicons name="send" size={20} color="#fff" />
-                            )}
-                        </Pressable>
-                    ) : null}
                 </View>
-            </KeyboardAvoidingView>
+            </Modal>
 
-            {/* ========== Modal Loading Upload ========== */}
+            {/* Modal Loading Upload */}
             <Modal
                 animationType="fade"
                 transparent
@@ -510,26 +771,38 @@ export default function ChatScreen() {
             >
                 <View style={styles.loadingOverlay}>
                     <View style={styles.loadingContainer}>
-                        <ActivityIndicator size="large" color={colors.primary} />
-                        <Text style={styles.loadingLabel}>Mengirim foto…</Text>
+                        <ActivityIndicator
+                            size="large"
+                            color={colors.primary}
+                        />
+                        <Text style={styles.loadingLabel}>
+                            Mengirim foto…
+                        </Text>
                     </View>
                 </View>
             </Modal>
 
-            {/* ========== Modal Pilih Sumber Foto ========== */}
+            {/* Modal Pilih Sumber Foto */}
             <Modal
                 visible={sourceModalVisible}
                 transparent
                 animationType="slide"
-                onRequestClose={() => setSourceModalVisible(false)}
+                onRequestClose={() =>
+                    setSourceModalVisible(false)
+                }
             >
                 <Pressable
                     style={styles.sourceOverlay}
                     onPress={() => setSourceModalVisible(false)}
                 >
-                    <Pressable style={styles.sourceSheet} onPress={() => { }}>
+                    <Pressable
+                        style={styles.sourceSheet}
+                        onPress={() => { }}
+                    >
                         <View style={styles.sourceHandle} />
-                        <Text style={styles.sourceTitle}>Kirim Foto</Text>
+                        <Text style={styles.sourceTitle}>
+                            Kirim Foto
+                        </Text>
 
                         <Pressable
                             style={styles.sourceOption}
@@ -543,10 +816,14 @@ export default function ChatScreen() {
                                 />
                             </View>
                             <View style={{ flex: 1 }}>
-                                <Text style={styles.sourceOptionLabel}>
+                                <Text
+                                    style={styles.sourceOptionLabel}
+                                >
                                     Ambil Foto
                                 </Text>
-                                <Text style={styles.sourceOptionSub}>
+                                <Text
+                                    style={styles.sourceOptionSub}
+                                >
                                     Buka kamera dan jepret sekarang
                                 </Text>
                             </View>
@@ -569,10 +846,14 @@ export default function ChatScreen() {
                                 />
                             </View>
                             <View style={{ flex: 1 }}>
-                                <Text style={styles.sourceOptionLabel}>
+                                <Text
+                                    style={styles.sourceOptionLabel}
+                                >
                                     Pilih dari Galeri
                                 </Text>
-                                <Text style={styles.sourceOptionSub}>
+                                <Text
+                                    style={styles.sourceOptionSub}
+                                >
                                     Ambil foto yang sudah ada
                                 </Text>
                             </View>
@@ -585,15 +866,19 @@ export default function ChatScreen() {
 
                         <Pressable
                             style={styles.sourceCancel}
-                            onPress={() => setSourceModalVisible(false)}
+                            onPress={() =>
+                                setSourceModalVisible(false)
+                            }
                         >
-                            <Text style={styles.sourceCancelText}>Batal</Text>
+                            <Text style={styles.sourceCancelText}>
+                                Batal
+                            </Text>
                         </Pressable>
                     </Pressable>
                 </Pressable>
             </Modal>
 
-            {/* ========== Alert Bottom Sheet ========== */}
+            {/* Alert Bottom Sheet */}
             <Modal
                 visible={alertVisible}
                 transparent
@@ -611,11 +896,19 @@ export default function ChatScreen() {
                             onPress={closeAlert}
                             style={styles.alertClose}
                         >
-                            <Ionicons name="close" size={24} color="#1c1c1c" />
+                            <Ionicons
+                                name="close"
+                                size={24}
+                                color="#1c1c1c"
+                            />
                         </TouchableOpacity>
 
-                        <Text style={styles.alertTitle}>{alertTitle}</Text>
-                        <Text style={styles.alertMessage}>{alertMessage}</Text>
+                        <Text style={styles.alertTitle}>
+                            {alertTitle}
+                        </Text>
+                        <Text style={styles.alertMessage}>
+                            {alertMessage}
+                        </Text>
 
                         <TouchableOpacity
                             onPress={() => {
@@ -654,10 +947,19 @@ const s = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
-    headerTitle: { fontSize: 16, fontWeight: '700', color: colors.text },
+    headerTitle: {
+        fontSize: 16,
+        fontWeight: '700',
+        color: colors.text,
+    },
     headerSub: { fontSize: 12, color: colors.primary },
 
-    loadingWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
+    loadingWrap: {
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 12,
+    },
     loadingText: { fontSize: 13, color: colors.textMuted },
 
     emptyWrap: {
@@ -667,7 +969,11 @@ const s = StyleSheet.create({
         gap: 12,
         padding: 24,
     },
-    emptyText: { fontSize: 14, color: colors.textMuted, textAlign: 'center' },
+    emptyText: {
+        fontSize: 14,
+        color: colors.textMuted,
+        textAlign: 'center',
+    },
 
     msgRow: { flexDirection: 'row' },
     msgRowMine: { justifyContent: 'flex-end' },
@@ -698,6 +1004,11 @@ const s = StyleSheet.create({
         textAlign: 'right',
     },
 
+    // ✅ Image dalam chat
+    imagePressable: {
+        borderRadius: 14,
+        overflow: 'hidden',
+    },
     imageMsg: {
         width: 220,
         height: 220,
@@ -713,7 +1024,11 @@ const s = StyleSheet.create({
         paddingVertical: 2,
         borderRadius: 8,
     },
-    imageTime: { color: '#fff', fontSize: 10, fontWeight: '600' },
+    imageTime: {
+        color: '#fff',
+        fontSize: 10,
+        fontWeight: '600',
+    },
 
     inputBar: {
         flexDirection: 'row',
@@ -724,6 +1039,23 @@ const s = StyleSheet.create({
         borderTopWidth: StyleSheet.hairlineWidth,
         borderTopColor: colors.border,
         backgroundColor: '#fff',
+    },
+    closedBar: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 8,
+        paddingHorizontal: 16,
+        paddingTop: 14,
+        borderTopWidth: StyleSheet.hairlineWidth,
+        borderTopColor: colors.border,
+        backgroundColor: '#F7F9FB',
+    },
+    closedText: {
+        flex: 1,
+        fontSize: 13,
+        color: colors.textMuted,
+        lineHeight: 18,
     },
     iconBtn: {
         width: 44,
@@ -756,7 +1088,40 @@ const s = StyleSheet.create({
 });
 
 const styles = StyleSheet.create({
-    // ---- Loading modal ----
+    // ============================================================
+    // ✅ FULLSCREEN IMAGE VIEWER
+    // ============================================================
+    viewerOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(0,0,0,0.95)',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    viewerContent: {
+        flex: 1,
+        width: '100%',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    viewerImage: {
+        width: SCREEN_W,
+        height: SCREEN_H,
+    },
+    viewerClose: {
+        position: 'absolute',
+        right: 16,
+        zIndex: 10,
+        width: 44,
+        height: 44,
+        borderRadius: 22,
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.2)',
+    },
+
+    // Loading modal
     loadingOverlay: {
         flex: 1,
         backgroundColor: 'rgba(0,0,0,0.5)',
@@ -783,7 +1148,7 @@ const styles = StyleSheet.create({
         textAlign: 'center',
     },
 
-    // ---- Source picker modal ----
+    // Source picker modal
     sourceOverlay: {
         flex: 1,
         backgroundColor: 'rgba(0,0,0,0.5)',
@@ -827,8 +1192,16 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
-    sourceOptionLabel: { fontSize: 15, fontWeight: '700', color: colors.text },
-    sourceOptionSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+    sourceOptionLabel: {
+        fontSize: 15,
+        fontWeight: '700',
+        color: colors.text,
+    },
+    sourceOptionSub: {
+        fontSize: 12,
+        color: colors.textMuted,
+        marginTop: 2,
+    },
     sourceCancel: {
         marginTop: 12,
         height: 50,
@@ -843,7 +1216,7 @@ const styles = StyleSheet.create({
         color: colors.text,
     },
 
-    // ---- Alert bottom sheet ----
+    // Alert bottom sheet
     alertOverlay: {
         flex: 1,
         backgroundColor: 'rgba(0,0,0,0.5)',

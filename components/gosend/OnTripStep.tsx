@@ -1,3 +1,4 @@
+import { mapStyle } from '@/constants/ojek-map-style';
 import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
 import { getRoute } from '@/services/google-maps';
@@ -24,26 +25,27 @@ import Animated, { FadeInUp } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CircleButton, MAP_PROVIDER } from '../ojek/parts';
 
+type LatLng = { latitude: number; longitude: number };
+
 type Props = {
     origin: PlaceLoc;
     destination: PlaceLoc;
-    driver: DriverInfo;
+    /** driver.coords harus diperbarui realtime oleh parent (polling) */
+    driver: DriverInfo & { coords?: LatLng | null };
+    /** status order dari backend (opsional): 'in_progress' | 'completed' */
+    status?: string;
     securityCode?: string | null;
     receiveCode: boolean;
     packageInfo?: PackageInfo;
     price?: number;
     optionName?: string;
     onBack: () => void;
+    /** dipanggil sekali saat status order menjadi 'completed' */
     onArrived?: () => void;
     onChat?: () => void;
     onCall?: () => void;
-    tripDurationMs?: number;
 };
 
-/**
- * Mapping gambar marker per tipe kendaraan.
- * Konsisten dengan DriverFoundStep — semua fallback ke `kurir`.
- */
 const MARKER_IMG: Record<string, any> = {
     kurir: require('@/assets/images/kurir-map.png'),
     motor: require('@/assets/images/kurir-map.png'),
@@ -51,7 +53,6 @@ const MARKER_IMG: Record<string, any> = {
     motor_food: require('@/assets/images/kurir-map.png'),
 };
 const DEFAULT_MARKER = MARKER_IMG.kurir;
-
 const MARKER_DEST = require('@/assets/images/marker-destination.png');
 
 function getMarkerImage(vehicleType?: string | null) {
@@ -59,17 +60,26 @@ function getMarkerImage(vehicleType?: string | null) {
     return MARKER_IMG[vehicleType.toLowerCase()] ?? DEFAULT_MARKER;
 }
 
-// Simulasi: tick 100 ms
-const TICK_MS = 100;
-const MARKER_ANIM_MS = 150;
+// Sedikit lebih pendek dari interval polling (3000 ms) di parent
+const MARKER_ANIM_MS = 2800;
+// Driver dianggap keluar jalur jika > 150 m dari polyline
+const OFF_ROUTE_METERS = 150;
+// Jeda minimum antar pengambilan ulang rute
+const REROUTE_MIN_INTERVAL_MS = 15000;
+// Dianggap dekat tujuan jika sisa jarak <= 30 m
+const NEAR_METERS = 30;
+// Abaikan gerak kecil (jitter GPS) untuk arah ikon
+const HEADING_MIN_METERS = 5;
+// 0 jika gambar menghadap ke atas (utara). Ubah (90/180/-90) bila perlu.
+const ICON_HEADING_OFFSET = 0;
+// Kamera mengikuti driver
+const FOLLOW_ZOOM = 16;
+const FOLLOW_START_DELAY_MS = 2500;
 
 const R = 6371000;
 const toRad = (d: number) => (d * Math.PI) / 180;
 
-function haversine(
-    a: { latitude: number; longitude: number },
-    b: { latitude: number; longitude: number }
-): number {
+function haversine(a: LatLng, b: LatLng): number {
     const dLat = toRad(b.latitude - a.latitude);
     const dLon = toRad(b.longitude - a.longitude);
     const x =
@@ -80,10 +90,7 @@ function haversine(
     return 2 * R * Math.asin(Math.sqrt(x));
 }
 
-function remainingDistance(
-    polyline: { latitude: number; longitude: number }[],
-    fromIdx: number
-): number {
+function remainingDistance(polyline: LatLng[], fromIdx: number): number {
     let total = 0;
     for (let i = fromIdx; i < polyline.length - 1; i++) {
         total += haversine(polyline[i], polyline[i + 1]);
@@ -91,11 +98,31 @@ function remainingDistance(
     return total;
 }
 
-function animateMarker(
-    region: AnimatedRegion,
-    to: { latitude: number; longitude: number },
-    duration: number
-) {
+function nearestIndex(polyline: LatLng[], pos: LatLng): number {
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < polyline.length; i++) {
+        const d = haversine(pos, polyline[i]);
+        if (d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+function bearing(a: LatLng, b: LatLng): number {
+    const y =
+        Math.sin(toRad(b.longitude - a.longitude)) * Math.cos(toRad(b.latitude));
+    const x =
+        Math.cos(toRad(a.latitude)) * Math.sin(toRad(b.latitude)) -
+        Math.sin(toRad(a.latitude)) *
+        Math.cos(toRad(b.latitude)) *
+        Math.cos(toRad(b.longitude - a.longitude));
+    return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+function animateMarker(region: AnimatedRegion, to: LatLng, duration: number) {
     const config: any = {
         latitude: to.latitude,
         longitude: to.longitude,
@@ -118,6 +145,7 @@ export default function OnTripStep({
     origin,
     destination,
     driver,
+    status,
     securityCode,
     receiveCode,
     packageInfo,
@@ -127,35 +155,67 @@ export default function OnTripStep({
     onArrived,
     onChat,
     onCall,
-    tripDurationMs = 60000,
 }: Props) {
     const insets = useSafeAreaInsets();
     const mapRef = useRef<MapView>(null);
 
     const SHEET_H = (receiveCode ? 380 : 320) + insets.bottom;
 
+    // Posisi driver realtime (fallback ke titik jemput bila belum ada)
+    const driverPos: LatLng = driver.coords ?? origin.coords;
+
     const [route, setRoute] = useState<RouteInfo | null>(null);
-    const [idx, setIdx] = useState(0);
     const [trackView, setTrackView] = useState(true);
 
-    const arrivedRef = useRef(false);
+    const fittedRef = useRef(false);
+    const mountedRef = useRef(true);
+    const reqRef = useRef(0);
+    const lastRerouteRef = useRef(0);
+    // Jarak total awal, supaya progress tidak reset saat rute diambil ulang
+    const baseTotalRef = useRef(0);
+
+    const [following, setFollowing] = useState(true);
+    const [followReady, setFollowReady] = useState(false);
+
     const onArrivedRef = useRef(onArrived);
     onArrivedRef.current = onArrived;
+    const arrivedFiredRef = useRef(false);
 
-    // ---- Ambil rute origin -> destination ----
     useEffect(() => {
-        let alive = true;
-        getRoute(origin.coords, destination.coords).then((r) => {
-            if (!alive) return;
-            setRoute(r);
-            setIdx(0);
-        });
+        mountedRef.current = true;
         return () => {
-            alive = false;
+            mountedRef.current = false;
         };
-    }, [origin.coords, destination.coords]);
+    }, []);
 
-    const polyline = useMemo(
+    // ---- Ambil rute ----
+    const fetchRoute = (from: LatLng) => {
+        const id = ++reqRef.current;
+        getRoute(from, destination.coords)
+            .then((r) => {
+                if (mountedRef.current && id === reqRef.current) {
+                    if (!baseTotalRef.current && r?.distanceMeters) {
+                        baseTotalRef.current = r.distanceMeters;
+                    }
+                    setRoute(r);
+                }
+            })
+            .catch((err) =>
+                console.warn('[GoSend OnTrip] Gagal ambil rute:', err?.message)
+            );
+    };
+
+    // Rute awal: titik jemput -> tujuan
+    useEffect(() => {
+        fetchRoute(origin.coords);
+    }, [
+        origin.coords.latitude,
+        origin.coords.longitude,
+        destination.coords.latitude,
+        destination.coords.longitude,
+    ]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const polyline = useMemo<LatLng[]>(
         () =>
             route?.polyline?.length
                 ? route.polyline
@@ -164,54 +224,51 @@ export default function OnTripStep({
     );
     const last = polyline.length - 1;
 
-    // ---- AnimatedRegion untuk marker ----
+    // ---- Posisi driver pada polyline (REALTIME) ----
+    const idx = useMemo(
+        () => nearestIndex(polyline, driverPos),
+        [polyline, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
+    );
+
+    // ---- Rute ulang kalau driver keluar jalur ----
+    useEffect(() => {
+        if (!route) return;
+        const offRoute = haversine(driverPos, polyline[idx]);
+        const now = Date.now();
+        if (
+            offRoute > OFF_ROUTE_METERS &&
+            now - lastRerouteRef.current > REROUTE_MIN_INTERVAL_MS
+        ) {
+            lastRerouteRef.current = now;
+            fetchRoute(driverPos);
+        }
+    }, [driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // ---- Marker driver: bergerak halus ----
     const driverCoord = useRef(
         new AnimatedRegion({
-            latitude: origin.coords.latitude,
-            longitude: origin.coords.longitude,
+            latitude: driverPos.latitude,
+            longitude: driverPos.longitude,
             latitudeDelta: 0,
             longitudeDelta: 0,
         })
     ).current;
 
     useEffect(() => {
-        if (polyline.length === 0) return;
-        const p0 = polyline[0];
-        driverCoord.setValue({
-            latitude: p0.latitude,
-            longitude: p0.longitude,
-            latitudeDelta: 0,
-            longitudeDelta: 0,
-        });
-    }, [polyline, driverCoord]);
+        animateMarker(driverCoord, driverPos, MARKER_ANIM_MS);
+    }, [driverPos.latitude, driverPos.longitude, driverCoord]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ---- Simulasi pergerakan: tick 100 ms ----
+    // ---- Arah ikon dari pergerakan terakhir ----
+    const [heading, setHeading] = useState(0);
+    const prevPosRef = useRef<LatLng>(driverPos);
     useEffect(() => {
-        if (last < 1) return;
-        const totalTicks = Math.max(1, Math.round(tripDurationMs / TICK_MS));
-        const stepSize = Math.max(0.5, last / totalTicks);
-        const id = setInterval(() => {
-            setIdx((i) => {
-                const next = i + stepSize;
-                return next >= last ? last : next;
-            });
-        }, TICK_MS);
-        return () => clearInterval(id);
-    }, [last, tripDurationMs]);
+        if (haversine(prevPosRef.current, driverPos) > HEADING_MIN_METERS) {
+            setHeading(bearing(prevPosRef.current, driverPos));
+            prevPosRef.current = driverPos;
+        }
+    }, [driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ---- Animasikan marker tiap idx berubah ----
-    useEffect(() => {
-        if (polyline.length === 0) return;
-        const pos = polyline[Math.min(Math.floor(idx), last)];
-        if (!pos) return;
-        animateMarker(driverCoord, pos, MARKER_ANIM_MS);
-    }, [idx, polyline, last, driverCoord]);
-
-    useEffect(() => {
-        const t = setTimeout(() => setTrackView(false), 500);
-        return () => clearTimeout(t);
-    }, []);
-
+    // ---- Fit peta sekali saat rute pertama tiba ----
     const fit = () => {
         mapRef.current?.fitToCoordinates(polyline, {
             edgePadding: {
@@ -224,74 +281,123 @@ export default function OnTripStep({
         });
     };
     useEffect(() => {
-        if (route) fit();
+        if (route && !fittedRef.current) {
+            fittedRef.current = true;
+            fit();
+            const t = setTimeout(() => setFollowReady(true), FOLLOW_START_DELAY_MS);
+            return () => clearTimeout(t);
+        }
     }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const arrived = last >= 1 && idx >= last;
-
+    // ---- Kamera mengikuti driver ----
     useEffect(() => {
-        if (arrived && !arrivedRef.current) {
-            arrivedRef.current = true;
-            onArrivedRef.current?.();
-        }
-    }, [arrived]);
+        if (!following || !followReady) return;
+        mapRef.current?.animateCamera(
+            { center: driverPos, zoom: FOLLOW_ZOOM },
+            { duration: MARKER_ANIM_MS }
+        );
+    }, [following, followReady, driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const progress = last > 0 ? idx / last : 1;
-
+    // ---- Sisa jarak, progress, ETA ----
     const remainingMeters = useMemo(() => {
-        if (last < 1) return 0;
-        return remainingDistance(polyline, Math.min(Math.floor(idx), last));
-    }, [polyline, idx, last]);
+        if (last < 0) return 0;
+        return haversine(driverPos, polyline[idx]) + remainingDistance(polyline, idx);
+    }, [polyline, idx, last, driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const totalMeters = Math.max(
+        baseTotalRef.current ||
+        route?.distanceMeters ||
+        remainingDistance(polyline, 0),
+        remainingMeters,
+        1
+    );
+    const progress = Math.min(1, Math.max(0, 1 - remainingMeters / totalMeters));
 
     const remainingKm = (remainingMeters / 1000).toFixed(1);
-    const totalDistKm = route ? (route.distanceMeters / 1000).toFixed(1) : null;
+    const totalDistKm = (totalMeters / 1000).toFixed(1);
 
-    const totalSec = route?.durationSec ?? Math.round(tripDurationMs / 1000);
-    const remainSec = Math.round(totalSec * (1 - progress));
+    const baseSec = route?.durationSec ?? 0;
+    const routeMeters = route?.distanceMeters ?? totalMeters;
+    const remainSec = Math.round(
+        baseSec * Math.min(1, remainingMeters / Math.max(routeMeters, 1))
+    );
     const minutes = Math.max(1, Math.ceil(remainSec / 60));
+
+    // Dekat tujuan (berdasarkan jarak), selesai (berdasarkan status backend)
+    const nearDestination = remainingMeters <= NEAR_METERS;
+    const completed = status === 'completed';
+
+    useEffect(() => {
+        if (completed && !arrivedFiredRef.current) {
+            arrivedFiredRef.current = true;
+            onArrivedRef.current?.();
+        }
+    }, [completed]);
 
     const call = () =>
         onCall ? onCall() : Linking.openURL(`tel:${driver.phone}`);
 
     const markerImg = getMarkerImage(driver.vehicleType);
 
+    // Jalur yang sudah dilewati & yang belum
+    const passed = useMemo(
+        () => [...polyline.slice(0, idx + 1), driverPos],
+        [polyline, idx, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
+    );
+    const ahead = useMemo(
+        () => [driverPos, ...polyline.slice(idx + 1)],
+        [polyline, idx, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
+    );
+
     return (
         <View style={{ flex: 1 }}>
             <MapView
                 ref={mapRef}
                 style={StyleSheet.absoluteFill}
+                customMapStyle={mapStyle}
                 provider={MAP_PROVIDER}
                 toolbarEnabled={false}
                 rotateEnabled={false}
                 onMapReady={fit}
+                // geser manual → berhenti mengikuti driver
+                onPanDrag={() => setFollowing(false)}
                 initialRegion={{
-                    latitude: origin.coords.latitude,
-                    longitude: origin.coords.longitude,
+                    latitude: driverPos.latitude,
+                    longitude: driverPos.longitude,
                     latitudeDelta: 0.03,
                     longitudeDelta: 0.03,
                 }}
             >
-                <Polyline
-                    coordinates={polyline.slice(0, Math.floor(idx) + 1)}
-                    strokeColor={colors.border}
-                    strokeWidth={5}
-                    lineCap="round"
-                    lineJoin="round"
-                />
-                <Polyline
-                    coordinates={polyline.slice(Math.floor(idx))}
-                    strokeColor="#ffffff"
-                    strokeWidth={9}
-                    lineCap="round"
-                    lineJoin="round"
-                />
-                <Polyline
-                    coordinates={polyline.slice(Math.floor(idx))}
-                    strokeColor={colors.primary}
-                    strokeWidth={5}
-                    lineCap="round"
-                    lineJoin="round"
-                />
+                {/* Jalur yang sudah dilewati */}
+                {passed.length > 1 && (
+                    <Polyline
+                        coordinates={passed}
+                        strokeColor={colors.border}
+                        strokeWidth={5}
+                        lineCap="round"
+                        lineJoin="round"
+                    />
+                )}
+
+                {/* Jalur yang belum dilewati */}
+                {ahead.length > 1 && (
+                    <>
+                        <Polyline
+                            coordinates={ahead}
+                            strokeColor="#ffffff"
+                            strokeWidth={9}
+                            lineCap="round"
+                            lineJoin="round"
+                        />
+                        <Polyline
+                            coordinates={ahead}
+                            strokeColor={colors.primary}
+                            strokeWidth={5}
+                            lineCap="round"
+                            lineJoin="round"
+                        />
+                    </>
+                )}
 
                 <Marker
                     coordinate={destination.coords}
@@ -302,9 +408,12 @@ export default function OnTripStep({
                     zIndex={1}
                 />
 
+                {/* Marker driver: realtime, berputar sesuai arah */}
                 <MarkerAnimated
                     coordinate={driverCoord}
                     anchor={{ x: 0.5, y: 0.5 }}
+                    flat
+                    rotation={(heading + ICON_HEADING_OFFSET) % 360}
                     tracksViewChanges={trackView}
                     zIndex={2}
                 >
@@ -313,6 +422,7 @@ export default function OnTripStep({
                             source={markerImg}
                             style={{ width: 34, height: 34 }}
                             resizeMode="contain"
+                            onLoad={() => setTimeout(() => setTrackView(false), 150)}
                         />
                     </View>
                 </MarkerAnimated>
@@ -339,6 +449,22 @@ export default function OnTripStep({
                 <CircleButton icon="arrow-back" onPress={onBack} />
             </View>
 
+            {/* Tombol pusatkan ke driver, muncul saat peta digeser manual */}
+            {!following && (
+                <View style={[s.floatRecenter, { bottom: SHEET_H + 12 }]}>
+                    <CircleButton
+                        icon="locate"
+                        onPress={() => {
+                            setFollowing(true);
+                            mapRef.current?.animateCamera(
+                                { center: driverPos, zoom: FOLLOW_ZOOM },
+                                { duration: 600 }
+                            );
+                        }}
+                    />
+                </View>
+            )}
+
             <Animated.View
                 entering={FadeInUp.duration(350)}
                 style={[
@@ -357,21 +483,23 @@ export default function OnTripStep({
                     <View style={s.statusRow}>
                         <View style={{ flex: 1 }}>
                             <Text style={s.statusTitle}>
-                                {arrived
-                                    ? 'Paket sampai di tujuan'
-                                    : 'Paketmu dalam perjalanan'}
+                                {completed
+                                    ? 'Paket sudah diterima'
+                                    : nearDestination
+                                        ? 'Driver sudah di tujuan'
+                                        : 'Paketmu dalam perjalanan'}
                             </Text>
                             <Text style={s.statusSub}>
-                                {arrived
-                                    ? 'Menyerahkan paket ke penerima'
-                                    : totalDistKm
-                                        ? `${remainingKm} km lagi dari total ${totalDistKm} km`
-                                        : 'Pantau posisinya di peta'}
+                                {completed
+                                    ? 'Pengiriman selesai'
+                                    : nearDestination
+                                        ? 'Menyerahkan paket ke penerima'
+                                        : `${remainingKm} km lagi dari total ${totalDistKm} km`}
                             </Text>
                         </View>
                         <View style={s.etaBox}>
                             <Text style={s.etaNum}>
-                                {arrived ? '0' : minutes}
+                                {completed || nearDestination ? '0' : minutes}
                             </Text>
                             <Text style={s.etaUnit}>mnt</Text>
                         </View>
@@ -440,9 +568,7 @@ export default function OnTripStep({
                                     <Text style={s.payText}>Tunai</Text>
                                 </View>
                             </View>
-                            <Text style={s.farePrice}>
-                                {formatRupiah(price)}
-                            </Text>
+                            <Text style={s.farePrice}>{formatRupiah(price)}</Text>
                         </View>
                     )}
 
@@ -456,17 +582,13 @@ export default function OnTripStep({
                                 />
                             </View>
                             <View style={{ flex: 1 }}>
-                                <Text style={s.codeTitle}>
-                                    Kode keamanan
-                                </Text>
+                                <Text style={s.codeTitle}>Kode keamanan</Text>
                                 <Text style={s.codeSub}>
-                                    Cocokkan dengan driver sebelum serah
-                                    terima paket
+                                    Cocokkan dengan driver sebelum serah terima
+                                    paket
                                 </Text>
                             </View>
-                            <Text style={s.codeValue}>
-                                {securityCode || '—'}
-                            </Text>
+                            <Text style={s.codeValue}>{securityCode || '—'}</Text>
                         </View>
                     )}
                 </ScrollView>
@@ -497,11 +619,7 @@ const s = StyleSheet.create({
         shadowOffset: { width: 0, height: 3 },
     },
     routeRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-    routeLabel: {
-        fontSize: 11,
-        fontWeight: '700',
-        color: colors.textMuted,
-    },
+    routeLabel: { fontSize: 11, fontWeight: '700', color: colors.textMuted },
     routeText: {
         fontSize: 15,
         fontWeight: '700',
@@ -523,6 +641,7 @@ const s = StyleSheet.create({
         backgroundColor: '#fff',
     },
     floatBack: { position: 'absolute', left: 16 },
+    floatRecenter: { position: 'absolute', right: 16 },
     sheet: {
         position: 'absolute',
         left: 0,
@@ -589,11 +708,7 @@ const s = StyleSheet.create({
         marginBottom: 12,
     },
     driverName: { fontSize: 15, fontWeight: '800', color: colors.text },
-    driverPlate: {
-        fontSize: 12,
-        color: colors.textMuted,
-        marginTop: 2,
-    },
+    driverPlate: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
     iconBtn: {
         width: 40,
         height: 40,

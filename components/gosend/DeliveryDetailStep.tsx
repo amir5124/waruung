@@ -1,3 +1,4 @@
+import { mapStyle } from '@/constants/ojek-map-style';
 import { colors } from '@/constants/ojek-theme';
 import { api, Tariff } from '@/lib/api';
 import { trackQuote } from '@/lib/behaviorTracker';
@@ -171,7 +172,7 @@ export default function DeliveryDetailStep({
             .map((t) => {
                 // WarSend S: motor biasa ~25 km/jam
                 // WarSend L: motor prioritas ~30 km/jam
-                const speedKmh = t.code === 'warsend_l' ? 30 : 25;
+                const speedKmh = t.code === 'usend_l' ? 30 : 25;
                 const pickupMin = t.eta_min; // dari DB = estimasi jemput driver
                 const travelMin = Math.ceil((distanceKm / speedKmh) * 60);
                 const totalMin = pickupMin + travelMin;
@@ -184,7 +185,7 @@ export default function DeliveryDetailStep({
                 return {
                     id: t.code,
                     name: t.label,
-                    tag: t.code === 'warsend_s' ? 'CEPAAAT' : undefined,
+                    tag: t.code === 'usend_s' ? 'CEPAAAT' : undefined,
                     eta: `${totalMin} menit`,
                     price: t.min_fare,
                     tariffCode: t.code,
@@ -384,7 +385,7 @@ export default function DeliveryDetailStep({
                     <Ionicons name="arrow-back" size={22} color="#fff" />
                 </Pressable>
                 <Ionicons name="cube" size={18} color="#fff" style={{ marginLeft: 12 }} />
-                <Text style={s.headerTitle}>warsend</Text>
+                <Text style={s.headerTitle}>usend</Text>
             </View>
 
             <ScrollView
@@ -504,6 +505,7 @@ export default function DeliveryDetailStep({
                     <MapView
                         ref={mapRef}
                         style={{ flex: 1 }}
+                        customMapStyle={mapStyle}
                         provider={MAP_PROVIDER}
                         onMapReady={fitMap}
                         onLayout={fitMap}

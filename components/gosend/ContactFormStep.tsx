@@ -1,8 +1,10 @@
 import AppAlert from '@/components/AppAlert';
 import LoadingModal from '@/components/LoadingModal';
+import { mapStyle } from '@/constants/ojek-map-style';
 import { colors, MAP_DELTA } from '@/constants/ojek-theme';
 import { useNearbyDrivers } from '@/hooks/use-nearby-drivers';
 import { api } from '@/lib/api';
+import { normalizePhoneLocal, toE164 } from '@/lib/phone'; // ✅ NEW
 import { reverseGeocode } from '@/services/google-maps';
 import {
     findMainRoadSuggestion,
@@ -35,6 +37,7 @@ const STEM_H = 14;
 const PIN_TOTAL_H = PIN_SIZE + STEM_H;
 
 const LANDMARK_MAX = 100;
+const PHONE_MAX_DIGITS = 13; // ✅ NEW: digit setelah +62
 
 type LatLng = { latitude: number; longitude: number };
 
@@ -100,8 +103,12 @@ export default function ContactFormStep({
     const mapRef = useRef<MapView>(null);
 
     const [name, setName] = useState(initialContact?.name ?? '');
-    const [phone, setPhone] = useState(initialContact?.phone ?? '');
-    // ⬇️ State baru untuk patokan terdekat
+    // ✅ NEW: state hanya menyimpan digit lokal (tanpa +62 / 0 / 62),
+    // karena prefix "+62" sudah ditampilkan di samping input.
+    // Data dari database ("+62812...") otomatis dinormalkan.
+    const [phone, setPhone] = useState(
+        normalizePhoneLocal(initialContact?.phone)
+    );
     const [landmark, setLandmark] = useState(initialContact?.landmark ?? '');
     const [saveAddress, setSaveAddress] = useState(false);
 
@@ -120,8 +127,10 @@ export default function ContactFormStep({
     const accent = isPickup ? colors.primary : colors.secondary;
     const title = isPickup ? 'Detail pengambilan paket' : 'Lokasi pengiriman';
     const fieldLabel = isPickup ? 'Nama pengirim' : 'Nama penerima';
-    const canSubmit =
-        name.trim().length > 0 && phone.trim().length > 0 && !resolving;
+
+    // ✅ NEW: nomor valid bila kosong dicegah & minimal 9 digit (mis. 8123456789)
+    const phoneValid = phone.length >= 9;
+    const canSubmit = name.trim().length > 0 && phoneValid && !resolving;
 
     // Kurir online di sekitar titik (radius 3 km), di-poll tiap 5 detik
     const { drivers } = useNearbyDrivers(picked.coords, {
@@ -170,12 +179,9 @@ export default function ContactFormStep({
             latitude: Number(suggestion.coords?.latitude),
             longitude: Number(suggestion.coords?.longitude),
         };
-        const ok = [
-            a.latitude,
-            a.longitude,
-            b.latitude,
-            b.longitude,
-        ].every(Number.isFinite);
+        const ok = [a.latitude, a.longitude, b.latitude, b.longitude].every(
+            Number.isFinite
+        );
         return ok ? [a, b] : null;
     })();
     const lineKey = lineCoords
@@ -199,7 +205,7 @@ export default function ContactFormStep({
             Math.abs(place.coords.latitude - picked.coords.latitude) < 1e-7 &&
             Math.abs(place.coords.longitude - picked.coords.longitude) < 1e-7;
         if (same) return;
-        moved.current = false; // jangan resolve ulang, alamat sudah dari luar
+        moved.current = false;
         setResolving(false);
         setSuggestion(null);
         setPicked(place);
@@ -245,7 +251,7 @@ export default function ContactFormStep({
         );
     };
 
-    // ---- Profil user yang sedang login (sama seperti MenuScreen) ----
+    // ---- Profil user yang sedang login ----
     const [profile, setProfile] = useState<{
         full_name?: string | null;
         phone?: string | null;
@@ -254,21 +260,16 @@ export default function ContactFormStep({
     useEffect(() => {
         let cancelled = false;
         (async () => {
-            // 1. Cache dulu supaya tombol langsung siap dipakai
             try {
                 const raw = await AsyncStorage.getItem('profile');
                 if (raw && !cancelled) setProfile(JSON.parse(raw));
             } catch { }
 
-            // 2. Ambil data terbaru dari backend
             try {
                 const fresh = await api.me();
                 if (cancelled) return;
                 setProfile(fresh);
-                await AsyncStorage.setItem(
-                    'profile',
-                    JSON.stringify(fresh)
-                );
+                await AsyncStorage.setItem('profile', JSON.stringify(fresh));
             } catch (err) {
                 console.warn('[ContactForm] Gagal ambil profil:', err);
             }
@@ -278,26 +279,18 @@ export default function ContactFormStep({
         };
     }, []);
 
-    // Field +62 sudah ditampilkan, jadi buang awalan 0 / 62 / +62 dari nomor profil
-    const normalizePhone = (p?: string | null) => {
-        const digits = (p ?? '').replace(/\D/g, '');
-        if (digits.startsWith('62')) return digits.slice(2);
-        if (digits.startsWith('0')) return digits.slice(1);
-        return digits;
-    };
-
+    // ✅ CHANGED: pakai helper bersama, bukan fungsi lokal
     const toContact = (p: typeof profile): ContactInfo | null =>
         p?.full_name
             ? {
                 name: p.full_name,
-                phone: normalizePhone(p.phone),
+                phone: normalizePhoneLocal(p.phone),
             }
             : null;
 
-    // Prioritas: profil login; fallback ke prop myContact kalau ada
     const me: ContactInfo | null = toContact(profile) ?? myContact ?? null;
 
-    // ---- Alert & loading (komponen AppAlert + LoadingModal) ----
+    // ---- Alert & loading ----
     const [loadingProfile, setLoadingProfile] = useState(false);
     const [alertState, setAlertState] = useState({
         visible: false,
@@ -306,7 +299,6 @@ export default function ContactFormStep({
     });
 
     const showAlert = (title: string, message: string) => {
-        // Di iOS, modal baru tidak bisa muncul saat modal loading masih menutup
         setTimeout(
             () => setAlertState({ visible: true, title, message }),
             Platform.OS === 'ios' ? 400 : 0
@@ -315,15 +307,15 @@ export default function ContactFormStep({
 
     const fillFrom = (c: ContactInfo) => {
         setName(c.name);
-        if (c.phone) {
-            setPhone(c.phone);
+        const local = normalizePhoneLocal(c.phone); // ✅ CHANGED
+        if (local) {
+            setPhone(local);
         } else {
             showAlert(
                 'Nomor HP belum diisi',
                 'Nama sudah diisi. Lengkapi nomor HP di menu Data Diri, atau ketik manual di sini.'
             );
         }
-        // ⬇️ Ikut isi patokan kalau ada
         if (c.landmark) setLandmark(c.landmark);
     };
 
@@ -333,7 +325,6 @@ export default function ContactFormStep({
             return;
         }
 
-        // Profil belum termuat -> ambil dari backend dengan loading modal
         setLoadingProfile(true);
         try {
             const fresh = await api.me();
@@ -351,25 +342,21 @@ export default function ContactFormStep({
         } catch (err: any) {
             showAlert(
                 'Gagal memuat profil',
-                err?.message ||
-                'Periksa koneksi internetmu lalu coba lagi.'
+                err?.message || 'Periksa koneksi internetmu lalu coba lagi.'
             );
         } finally {
             setLoadingProfile(false);
         }
     };
 
-    // ⬇️ Handler submit: sertakan landmark kalau diisi
+    // ✅ CHANGED: nomor dikirim dalam format "+62xxxxxxxxxx" (atau '' bila kosong)
     const handleSubmit = () => {
         const trimmedLandmark = landmark.trim();
         onSubmit(
             {
                 name: name.trim(),
-                phone: phone.trim(),
-                // hanya kirim kalau tidak kosong
-                ...(trimmedLandmark
-                    ? { landmark: trimmedLandmark }
-                    : {}),
+                phone: toE164(phone),
+                ...(trimmedLandmark ? { landmark: trimmedLandmark } : {}),
             },
             saveAddress
         );
@@ -385,11 +372,7 @@ export default function ContactFormStep({
         >
             <View style={s.header}>
                 <Pressable onPress={onBack} hitSlop={10}>
-                    <Ionicons
-                        name="arrow-back"
-                        size={22}
-                        color={colors.text}
-                    />
+                    <Ionicons name="arrow-back" size={22} color={colors.text} />
                 </Pressable>
                 <Text style={s.title}>{title}</Text>
             </View>
@@ -416,6 +399,7 @@ export default function ContactFormStep({
                         <MapView
                             ref={mapRef}
                             style={StyleSheet.absoluteFill}
+                            customMapStyle={mapStyle}
                             provider={MAP_PROVIDER}
                             showsUserLocation
                             showsMyLocationButton={false}
@@ -427,10 +411,8 @@ export default function ContactFormStep({
                             zoomEnabled
                             initialRegion={{
                                 ...place.coords,
-                                latitudeDelta:
-                                    MAP_DELTA.latitudeDelta * 5,
-                                longitudeDelta:
-                                    MAP_DELTA.longitudeDelta * 5,
+                                latitudeDelta: MAP_DELTA.latitudeDelta * 5,
+                                longitudeDelta: MAP_DELTA.longitudeDelta * 5,
                             }}
                             onPress={handleMapPress}
                             onPanDrag={() => {
@@ -439,7 +421,6 @@ export default function ContactFormStep({
                             }}
                             onRegionChangeComplete={onRegionComplete}
                         >
-                            {/* Saran jalan + garis putus-putus */}
                             {isPickup && suggestion && lineCoords && (
                                 <>
                                     <MarchingLine
@@ -467,16 +448,10 @@ export default function ContactFormStep({
                                     tracksViewChanges={true}
                                     zIndex={5}
                                 >
-                                    <View
-                                        style={s.driverMarker}
-                                        collapsable={false}
-                                    >
+                                    <View style={s.driverMarker} collapsable={false}>
                                         <Image
                                             source={KURIR_IMG}
-                                            style={{
-                                                width: 28,
-                                                height: 28,
-                                            }}
+                                            style={{ width: 28, height: 28 }}
                                             resizeMode="contain"
                                         />
                                     </View>
@@ -486,52 +461,28 @@ export default function ContactFormStep({
 
                         <View
                             pointerEvents="none"
-                            style={[
-                                StyleSheet.absoluteFill,
-                                s.pinWrap,
-                            ]}
+                            style={[StyleSheet.absoluteFill, s.pinWrap]}
                         >
                             <View
                                 style={{
                                     alignItems: 'center',
-                                    transform: [
-                                        {
-                                            translateY:
-                                                -PIN_TOTAL_H / 2,
-                                        },
-                                    ],
+                                    transform: [{ translateY: -PIN_TOTAL_H / 2 }],
                                 }}
                             >
                                 <PinDot
-                                    type={
-                                        isPickup
-                                            ? 'origin'
-                                            : 'destination'
-                                    }
+                                    type={isPickup ? 'origin' : 'destination'}
                                     size={PIN_SIZE}
                                 />
                                 <View
-                                    style={[
-                                        s.stem,
-                                        { backgroundColor: accent },
-                                    ]}
+                                    style={[s.stem, { backgroundColor: accent }]}
                                 />
                             </View>
                         </View>
 
                         <View pointerEvents="none" style={s.tapPill}>
-                            <View
-                                style={[
-                                    s.tapIcon,
-                                    { backgroundColor: accent },
-                                ]}
-                            >
+                            <View style={[s.tapIcon, { backgroundColor: accent }]}>
                                 <Ionicons
-                                    name={
-                                        isPickup
-                                            ? 'arrow-up'
-                                            : 'arrow-down'
-                                    }
+                                    name={isPickup ? 'arrow-up' : 'arrow-down'}
                                     size={12}
                                     color="#fff"
                                 />
@@ -541,17 +492,10 @@ export default function ContactFormStep({
                     </View>
 
                     {isPickup && suggestion && !resolving && (
-                        <Pressable
-                            onPress={goToSuggestion}
-                            style={s.suggest}
-                        >
-                            <Text
-                                style={s.suggestText}
-                                numberOfLines={2}
-                            >
-                                Lebih mudah dijemput di{' '}
-                                {suggestion.name} ({suggestion.distance} m
-                                dari sini)
+                        <Pressable onPress={goToSuggestion} style={s.suggest}>
+                            <Text style={s.suggestText} numberOfLines={2}>
+                                Lebih mudah dijemput di {suggestion.name} (
+                                {suggestion.distance} m dari sini)
                             </Text>
                             <Text style={s.suggestAction}>Pindah</Text>
                         </Pressable>
@@ -563,20 +507,12 @@ export default function ContactFormStep({
                                 style={[s.placeName, { flex: 1 }]}
                                 numberOfLines={1}
                             >
-                                {resolving
-                                    ? 'Mencari alamat…'
-                                    : picked.name || '—'}
+                                {resolving ? 'Mencari alamat…' : picked.name || '—'}
                             </Text>
                             {resolving ? (
-                                <ActivityIndicator
-                                    size="small"
-                                    color={accent}
-                                />
+                                <ActivityIndicator size="small" color={accent} />
                             ) : (
-                                <Pressable
-                                    onPress={onEditAddress}
-                                    style={s.editPill}
-                                >
+                                <Pressable onPress={onEditAddress} style={s.editPill}>
                                     <Text style={s.editText}>Edit</Text>
                                 </Pressable>
                             )}
@@ -585,7 +521,6 @@ export default function ContactFormStep({
                             {resolving ? ' ' : picked.address}
                         </Text>
 
-                        {/* ⬇️ Input patokan terdekat — sekarang terhubung ke state */}
                         <View style={s.landmarkInput}>
                             <Ionicons
                                 name="flag-outline"
@@ -593,11 +528,7 @@ export default function ContactFormStep({
                                 color={colors.textMuted}
                             />
                             <TextInput
-                                style={{
-                                    flex: 1,
-                                    fontSize: 13,
-                                    color: colors.text,
-                                }}
+                                style={{ flex: 1, fontSize: 13, color: colors.text }}
                                 placeholder="Ada patokan terdekat? (opsional)"
                                 placeholderTextColor={colors.textMuted}
                                 value={landmark}
@@ -610,17 +541,10 @@ export default function ContactFormStep({
 
                     <View style={s.rowBetween}>
                         <Text style={s.sectionLabel}>
-                            {isPickup
-                                ? 'Detail pengirim'
-                                : 'Detail penerima'}
+                            {isPickup ? 'Detail pengirim' : 'Detail penerima'}
                         </Text>
-                        <Pressable
-                            onPress={handleUseMine}
-                            style={s.editPill}
-                        >
-                            <Text style={s.editText}>
-                                Pakai detail saya
-                            </Text>
+                        <Pressable onPress={handleUseMine} style={s.editPill}>
+                            <Text style={s.editText}>Pakai detail saya</Text>
                         </Pressable>
                     </View>
 
@@ -636,36 +560,43 @@ export default function ContactFormStep({
                                 returnKeyType="next"
                             />
                             <View style={s.avatarIcon}>
-                                <Ionicons
-                                    name="person"
-                                    size={14}
-                                    color="#fff"
-                                />
+                                <Ionicons name="person" size={14} color="#fff" />
                             </View>
                         </View>
                     </View>
 
                     <View style={s.field}>
-                        <Text style={s.fieldLabel}>
-                            Nomor telepon *
-                        </Text>
+                        <Text style={s.fieldLabel}>Nomor telepon *</Text>
                         <View style={s.phoneRow}>
                             <View style={s.countryCode}>
                                 <Text>🇮🇩</Text>
-                                <Text style={s.countryCodeText}>
-                                    +62
-                                </Text>
+                                <Text style={s.countryCodeText}>+62</Text>
                             </View>
                             <TextInput
                                 style={s.phoneInput}
-                                placeholder="Masukkan nomor telepon"
+                                placeholder="81xxxxx"
                                 placeholderTextColor={colors.textMuted}
                                 keyboardType="phone-pad"
                                 value={phone}
-                                onChangeText={setPhone}
+                                // ✅ CHANGED: hanya digit; bila user mengetik/menempel
+                                // "0812..." / "62812..." / "+62812...", awalannya dibuang
+                                onChangeText={(t) =>
+                                    setPhone(
+                                        normalizePhoneLocal(t).slice(
+                                            0,
+                                            PHONE_MAX_DIGITS
+                                        )
+                                    )
+                                }
+                                maxLength={PHONE_MAX_DIGITS + 4}
                                 returnKeyType="done"
                             />
                         </View>
+                        {phone.length > 0 && !phoneValid && (
+                            <Text style={s.phoneError}>
+                                Nomor telepon terlalu pendek
+                            </Text>
+                        )}
                     </View>
 
                     <Pressable
@@ -680,17 +611,11 @@ export default function ContactFormStep({
                             }}
                         >
                             <Ionicons
-                                name={
-                                    saveAddress
-                                        ? 'bookmark'
-                                        : 'bookmark-outline'
-                                }
+                                name={saveAddress ? 'bookmark' : 'bookmark-outline'}
                                 size={18}
                                 color={colors.text}
                             />
-                            <Text style={s.sectionLabel}>
-                                Simpan alamat?
-                            </Text>
+                            <Text style={s.sectionLabel}>Simpan alamat?</Text>
                         </View>
                         <View style={s.editPill}>
                             <Text style={s.editText}>Simpan</Text>
@@ -707,10 +632,7 @@ export default function ContactFormStep({
                     <Pressable
                         disabled={!canSubmit}
                         onPress={handleSubmit}
-                        style={[
-                            s.submitBtn,
-                            { opacity: canSubmit ? 1 : 0.5 },
-                        ]}
+                        style={[s.submitBtn, { opacity: canSubmit ? 1 : 0.5 }]}
                     >
                         <Text style={s.submitText}>
                             {isPickup ? 'Simpan' : 'Lanjut'}
@@ -725,9 +647,7 @@ export default function ContactFormStep({
                 visible={alertState.visible}
                 title={alertState.title}
                 message={alertState.message}
-                onClose={() =>
-                    setAlertState((a) => ({ ...a, visible: false }))
-                }
+                onClose={() => setAlertState((a) => ({ ...a, visible: false }))}
             />
         </View>
     );
@@ -773,11 +693,7 @@ const s = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
-    tapPillText: {
-        fontSize: 13,
-        fontWeight: '700',
-        color: colors.text,
-    },
+    tapPillText: { fontSize: 13, fontWeight: '700', color: colors.text },
     driverMarker: {
         width: 40,
         height: 40,
@@ -828,11 +744,7 @@ const s = StyleSheet.create({
         paddingHorizontal: 12,
         paddingVertical: 6,
     },
-    editText: {
-        color: colors.primary,
-        fontWeight: '700',
-        fontSize: 12,
-    },
+    editText: { color: colors.primary, fontWeight: '700', fontSize: 12 },
     landmarkInput: {
         flexDirection: 'row',
         alignItems: 'center',
@@ -842,17 +754,9 @@ const s = StyleSheet.create({
         paddingHorizontal: 14,
         height: 42,
     },
-    sectionLabel: {
-        fontSize: 14,
-        fontWeight: '700',
-        color: colors.text,
-    },
+    sectionLabel: { fontSize: 14, fontWeight: '700', color: colors.text },
     field: { marginBottom: 16 },
-    fieldLabel: {
-        fontSize: 12,
-        color: colors.textMuted,
-        marginBottom: 6,
-    },
+    fieldLabel: { fontSize: 12, color: colors.textMuted, marginBottom: 6 },
     fieldRow: {
         flexDirection: 'row',
         alignItems: 'center',
@@ -877,13 +781,10 @@ const s = StyleSheet.create({
         borderColor: colors.border,
         paddingBottom: 8,
     },
-    countryCode: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 4,
-    },
+    countryCode: { flexDirection: 'row', alignItems: 'center', gap: 4 },
     countryCodeText: { fontSize: 15, color: colors.text },
     phoneInput: { flex: 1, fontSize: 15, color: colors.text },
+    phoneError: { marginTop: 6, fontSize: 12, color: '#e5484d' },
     submitBtn: {
         height: 54,
         borderRadius: 27,

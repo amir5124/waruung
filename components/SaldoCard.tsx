@@ -7,12 +7,13 @@ type Props = {
     badgeCount?: number;
     onPressAdd?: () => void;
     onPressTopup?: () => void;
+    onPressWithdraw?: () => void;
     onPressHistory?: () => void;
     onPressMore?: () => void;
 };
 
 const BLUE = '#2F86EB';
-const BLUE_SOFT = '#E3EEFC';
+const BLUE_SOFT = '#E9F7F6';
 
 const formatRupiah = (value: number) =>
     'Rp' + Math.round(value).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
@@ -69,11 +70,9 @@ function Action({ label, s, onPress, badge, children }: ActionProps) {
 export default function SaldoCard({
     balance,
     coins = 0,
-    badgeCount = 0,
-    onPressAdd,
     onPressTopup,
+    onPressWithdraw,
     onPressHistory,
-    onPressMore,
 }: Props) {
     const s = useScale();
     const walletSize = Math.round(44 * s);
@@ -108,30 +107,7 @@ export default function SaldoCard({
                             <Ionicons name="add-circle-outline" size={Math.round(20 * s)} color="#8A8A8A" />
                         </Pressable> */}
                     </View>
-                    <View style={styles.coinRow}>
-                        <View
-                            style={[
-                                styles.coinDot,
-                                { width: coinSize, height: coinSize, borderRadius: coinSize / 2 },
-                            ]}
-                        >
-                            <View
-                                style={{
-                                    width: coinSize * 0.55,
-                                    height: coinSize * 0.55,
-                                    borderRadius: coinSize * 0.3,
-                                    backgroundColor: '#F5A623',
-                                }}
-                            />
-                        </View>
-                        <Text
-                            style={[styles.coinText, { fontSize: Math.round(12 * s) }]}
-                            numberOfLines={1}
-                            allowFontScaling={false}
-                        >
-                            {coins} coins
-                        </Text>
-                    </View>
+
                 </View>
             </View>
 
@@ -143,6 +119,12 @@ export default function SaldoCard({
                 </Action>
 
                 <View style={[styles.divider, { height: Math.round(44 * s) }]} />
+                <Action label="Tarik" s={s} onPress={onPressWithdraw}>
+                    <Ionicons name="arrow-down" size={iconSize} color={BLUE} />
+                </Action>
+
+
+                <View style={[styles.divider, { height: Math.round(44 * s) }]} />
                 <Action label="Riwayat" s={s} onPress={onPressHistory}>
                     <Ionicons name="document-text-outline" size={iconSize} color={BLUE} />
                     <View style={styles.clockBadge}>
@@ -150,10 +132,7 @@ export default function SaldoCard({
                     </View>
                 </Action>
 
-                <View style={[styles.divider, { height: Math.round(44 * s) }]} />
-                <Action label="Lainnya" s={s} onPress={onPressMore} badge={badgeCount}>
-                    <Ionicons name="ellipsis-horizontal" size={iconSize} color={BLUE} />
-                </Action>
+
             </View>
         </View>
     );

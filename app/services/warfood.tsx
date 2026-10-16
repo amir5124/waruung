@@ -1,4 +1,6 @@
+// app/services/warfood.tsx
 import WarfoodFlow from '@/components/warfood/WarfoodFlow';
+import type { NearbyMerchant } from '@/lib/api';
 import { Stack, useRouter } from 'expo-router';
 import React from 'react';
 
@@ -10,9 +12,8 @@ export default function WarfoodScreen() {
             <WarfoodFlow
                 locationLabel="Jl. Raya Tambahrejo, Jawa Tengah"
                 onExit={() => router.back()}
-                onSelectResto={(item) => {
-                    // TODO: navigasi ke halaman detail resto
-                    console.log('SELECTED RESTO', item);
+                onSelectResto={(m: NearbyMerchant) => {
+                    router.push({ pathname: '/resto/[id]', params: { id: m.user_id } } as any);
                 }}
             />
         </>

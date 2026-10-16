@@ -1,3 +1,4 @@
+import { mapStyle } from '@/constants/ojek-map-style';
 import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
 import type { OrderPayload } from '@/types/ojek';
@@ -8,6 +9,7 @@ import MapView from 'react-native-maps';
 import Animated, {
     cancelAnimation,
     Easing,
+    FadeIn,
     FadeInUp,
     useAnimatedStyle,
     useSharedValue,
@@ -26,7 +28,6 @@ type Props = {
     onDriverFound?: () => void;
     /** lama pencarian dummy, default 5 detik */
     searchDelayMs?: number;
-    
 };
 
 const ORANGE = '#f26b21';
@@ -40,6 +41,12 @@ const VEHICLE_IMG = {
 const RING_SIZE = 260; // diameter ring terbesar
 const DOT_SIZE = 26;
 const ROUTE_CARD_H = 90; // perkiraan tinggi kartu asal-tujuan
+
+// ---- animasi zoom ----
+const START_ZOOM = 12; // awal: tampak luas
+const END_ZOOM = 17; // akhir: dekat ke titik jemput
+const ZOOM_DELAY = 400; // jeda sebelum zoom mulai
+const ZOOM_DURATION = 2000; // lama animasi zoom
 
 /**
  * Ring radar. Digambar sebagai View biasa DI ATAS peta (bukan children <Marker>),
@@ -159,19 +166,43 @@ export default function SearchingDriverStep({
 
     const { latitude, longitude } = payload.origin.coords;
 
+    // ---- zoom ke titik jemput ----
+    const zoomedRef = useRef(false);
+    const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
     const zoomToPickup = () => {
-        mapRef.current?.animateToRegion(
-            { latitude, longitude, latitudeDelta: 0.004, longitudeDelta: 0.004 },
-            800
-        );
+        if (zoomedRef.current) return; // hindari animasi ganda
+        zoomedRef.current = true;
+
+        // jeda singkat supaya peta selesai render dulu, jadi animasinya terlihat
+        zoomTimerRef.current = setTimeout(() => {
+            mapRef.current?.animateCamera(
+                { center: { latitude, longitude }, zoom: END_ZOOM },
+                { duration: ZOOM_DURATION }
+            );
+        }, ZOOM_DELAY);
     };
+
+    useEffect(() => {
+        return () => {
+            if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current);
+        };
+    }, []);
+
+    // ---- radar muncul setelah zoom hampir selesai ----
+    const [showRadar, setShowRadar] = useState(false);
+    useEffect(() => {
+        const t = setTimeout(() => setShowRadar(true), ZOOM_DELAY + ZOOM_DURATION - 300);
+        return () => clearTimeout(t);
+    }, []);
 
     return (
         <View style={{ flex: 1 }}>
-            {/* Peta: mulai agak jauh lalu zoom halus ke titik jemput */}
+            {/* Peta: mulai dari zoom jauh lalu zoom halus ke titik jemput */}
             <MapView
                 ref={mapRef}
                 style={StyleSheet.absoluteFill}
+                customMapStyle={mapStyle}
                 provider={MAP_PROVIDER}
                 toolbarEnabled={false}
                 rotateEnabled={false}
@@ -180,11 +211,24 @@ export default function SearchingDriverStep({
                 pitchEnabled={false}
                 mapPadding={{ top: TOP_INSET, bottom: SHEET_H, left: 0, right: 0 }}
                 onMapReady={zoomToPickup}
-                initialRegion={{ latitude, longitude, latitudeDelta: 0.02, longitudeDelta: 0.02 }}
+                initialCamera={{
+                    center: { latitude, longitude },
+                    zoom: START_ZOOM,
+                    heading: 0,
+                    pitch: 0,
+                }}
             />
 
-            {/* Ring radar + titik jemput (di atas peta, di tengah area terlihat) */}
-            <RadarOverlay top={centerY - RING_SIZE / 2} />
+            {/* Ring radar + titik jemput (muncul setelah zoom hampir selesai) */}
+            {showRadar && (
+                <Animated.View
+                    entering={FadeIn.duration(400)}
+                    style={StyleSheet.absoluteFill}
+                    pointerEvents="none"
+                >
+                    <RadarOverlay top={centerY - RING_SIZE / 2} />
+                </Animated.View>
+            )}
 
             {/* Kartu asal-tujuan + tombol Edit */}
             <Animated.View entering={FadeInUp.duration(300)} style={[s.routeCard, { top: insets.top + 12 }]}>

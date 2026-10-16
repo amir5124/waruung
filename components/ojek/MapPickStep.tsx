@@ -1,3 +1,4 @@
+import { mapStyle } from '@/constants/ojek-map-style';
 import { colors, MAP_DELTA } from '@/constants/ojek-theme';
 import { useNearbyDrivers } from '@/hooks/use-nearby-drivers';
 import { reverseGeocode } from '@/services/google-maps';
@@ -225,6 +226,7 @@ export default function MapPickStep({
                 <MapView
                     ref={mapRef}
                     style={StyleSheet.absoluteFill}
+                    customMapStyle={mapStyle}
                     provider={MAP_PROVIDER}
                     initialRegion={
                         isPickup

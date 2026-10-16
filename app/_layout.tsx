@@ -1,4 +1,5 @@
 // app/_layout.tsx (customer)
+import NetworkGuard from '@/components/NetworkGuard';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 import {
@@ -29,16 +30,12 @@ const ONBOARDING_KEY = 'hasSeenOnboarding';
 
 // ============================================================
 // 🌅 SPLASH SCREEN
-// ------------------------------------------------------------
-// Splash native (expo-splash-screen) ditahan sampai gambar splash
-// custom selesai dimuat, lalu splash custom (full layar, cover)
-// tampil dan fade out setelah app siap.
 // ============================================================
 SplashScreen.preventAutoHideAsync();
 SplashScreen.setOptions({ fade: true, duration: 250 });
 
-const SPLASH_MIN_DURATION = 1500; // ms, durasi minimal splash custom tampil
-const SPLASH_FADE_DURATION = 400; // ms, durasi fade out
+const SPLASH_MIN_DURATION = 1500;
+const SPLASH_FADE_DURATION = 400;
 
 function CustomSplash({
   ready,
@@ -68,7 +65,7 @@ function CustomSplash({
         StyleSheet.absoluteFill,
         {
           opacity,
-          backgroundColor: '#e4f5fe', // samakan dengan warna tepi gambar
+          backgroundColor: '#e4f5fe',
           zIndex: 999,
         },
       ]}
@@ -82,21 +79,9 @@ function CustomSplash({
     </Animated.View>
   );
 }
+
 // ============================================================
 // 🔔 NOTIFIKASI: Channel khusus CUSTOMER
-// ============================================================
-// ⚠️ Channel ID & sound HARUS SAMA dengan:
-// - defaultChannel & sounds di app.json (customer)
-// - ANDROID_CHANNEL_ID di lib/push.ts (customer)
-// - CHANNEL_MAP.customer & SOUND_MAP.customer di backend
-//
-// Kalau ganti SUARA notifikasi, WAJIB ganti ID ini (-v3, -v4, dst)
-// supaya Android membuat channel baru. Suara channel dikunci saat
-// channel pertama dibuat, dan kalau channel yang sama dihapus lalu
-// dibuat ulang, Android memulihkan pengaturan lamanya.
-//
-// Nama file suara: huruf kecil/angka/underscore (tanpa tanda hubung).
-// File: assets/sounds/customer.mp3
 // ============================================================
 export const CUSTOMER_CHANNEL_ID = 'customer-notif-v2';
 const CUSTOMER_SOUND = 'customer.mp3';
@@ -106,7 +91,6 @@ const OLD_CHANNEL_IDS = ['customer-notif-v1', 'orders'];
 async function setupNotifications() {
   try {
     if (Platform.OS === 'android') {
-      // ── 1. Hapus channel lama ──
       for (const id of OLD_CHANNEL_IDS) {
         try {
           await Notifications.deleteNotificationChannelAsync(id);
@@ -114,7 +98,6 @@ async function setupNotifications() {
         } catch { }
       }
 
-      // ── 2. Buat channel baru ──
       await Notifications.setNotificationChannelAsync(CUSTOMER_CHANNEL_ID, {
         name: 'Notifikasi',
         description: 'Notifikasi order dan transaksi',
@@ -122,15 +105,14 @@ async function setupNotifications() {
         sound: CUSTOMER_SOUND,
         vibrationPattern: [0, 250, 250, 250],
         enableVibrate: true,
-        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+        lockscreenVisibility:
+          Notifications.AndroidNotificationVisibility.PUBLIC,
         audioAttributes: {
           usage: Notifications.AndroidAudioUsage.NOTIFICATION,
           contentType: Notifications.AndroidAudioContentType.SONIFICATION,
         },
       });
 
-      // ── 3. Verifikasi ──
-      // Android hanya mengembalikan 'default' atau 'custom' (bukan nama file)
       const ch = await Notifications.getNotificationChannelAsync(
         CUSTOMER_CHANNEL_ID
       );
@@ -143,13 +125,11 @@ async function setupNotifications() {
 
       if (!ch?.sound || ch.sound === 'default') {
         console.warn(
-          '[CUSTOMER-LAYOUT] ⚠️ Channel masih suara default → cek customer.mp3 ' +
-          'di android/app/src/main/res/raw/, lalu GANTI ID channel (mis. v3).'
+          '[CUSTOMER-LAYOUT] ⚠️ Channel masih suara default → cek customer.mp3'
         );
       }
     }
 
-    // Android 13+ butuh izin POST_NOTIFICATIONS
     const perm = await Notifications.getPermissionsAsync();
     if (!perm.granted) {
       await Notifications.requestPermissionsAsync();
@@ -201,8 +181,9 @@ const resolveService = async (
   data: any,
   orderId: number
 ): Promise<ServiceRoute> => {
+  // Backend mengirim jenis layanan lewat key `service` (food | send | ride)
   const fromData =
-    routeFromType(data.order_type ?? data.service_type) ??
+    routeFromType(data.order_type ?? data.service_type ?? data.service) ??
     routeFromTariff(data.tariff_code);
   if (fromData) return fromData;
 
@@ -220,7 +201,8 @@ const resolveService = async (
 };
 
 const smartTarget = (data: any): string => {
-  const svc = routeFromTariff(data.option_name) ?? routeFromType(data.service);
+  const svc =
+    routeFromTariff(data.option_name) ?? routeFromType(data.service);
   if (svc) return svc;
   if (data.service === 'ride') return '/services/ojek-motor';
   return '/(tabs)';
@@ -228,10 +210,6 @@ const smartTarget = (data: any): string => {
 
 // ============================================================
 // Handler Tap Notifikasi
-// ------------------------------------------------------------
-// Tap yang datang SEBELUM navigator siap atau SEBELUM onboarding
-// selesai ditahan dulu (pendingRef), lalu diproses begitu siap.
-// Kalau tidak, router.push bisa gagal atau tertimpa redirect awal.
 // ============================================================
 function NotificationHandler() {
   const { setActiveOrder, setActiveRoomId } = useOrder();
@@ -290,41 +268,66 @@ function NotificationHandler() {
       return;
     }
 
+    // ===== Dompet =====
+    if (String(data.type ?? '').startsWith('topup')) {
+      setTimeout(() => router.push('/topup' as any), 300);
+      return;
+    }
+    if (String(data.type ?? '').startsWith('withdraw')) {
+      setTimeout(() => router.push('/tarik' as any), 300);
+      return;
+    }
+
     // ===== Order =====
     if (data.order_id) {
       const orderId = Number(data.order_id);
 
-      if (data.type === 'new_order') {
-        setActiveOrder(orderId, null);
+      resolveService(data, orderId).then((service) => {
+        const isFood = service === '/services/warfood';
+        let target: any;
+        let targetPath: string;
+
+        if (isFood) {
+          // Food tidak punya flow sendiri -> halaman order / rating.
+          // JANGAN setActiveOrder untuk food: tidak ada flow yang
+          // menghabiskannya, nanti ojek/kirim paket salah mem-boot order food.
+          const done =
+            data.type === 'status_update' && data.status === 'completed';
+          target = done
+            ? {
+              pathname: '/rating/[orderId]',
+              params: { orderId: String(orderId) },
+            }
+            : {
+              pathname: '/mencari-driver',
+              params: { orderId: String(orderId) },
+            };
+          targetPath = done ? '/rating' : '/mencari-driver';
+        } else {
+          // Ojek / kirim paket: flow-nya boot sendiri dari activeOrderId
+          setActiveOrder(orderId, service);
+          target = service;
+          targetPath = service;
+        }
+
+        console.log('[notif] buka order:', orderId, '->', targetPath);
+
         setTimeout(() => {
-          if (pathnameRef.current.startsWith('/(tabs)')) {
-            console.log('[notif] Sudah di (tabs) — skip push');
-            return;
-          }
-          router.push('/(tabs)' as any);
-        }, 300);
-        return;
-      }
-
-      resolveService(data, orderId).then((target) => {
-        console.log('[notif] redirect ke:', target, 'orderId:', orderId);
-
-        setActiveOrder(orderId, target);
-
-        setTimeout(() => {
-          if (pathnameRef.current === target) {
-            console.log('[notif] Sudah di route target', target, '— skip push');
+          if (pathnameRef.current.startsWith(targetPath)) {
+            console.log('[notif] Sudah di halaman target, skip push');
             return;
           }
           router.push(target as any);
         }, 300);
       });
+      return;
     }
   };
 
   const handleTapOnce = (data: any) => {
     if (!data) return;
-    const key = `${data.type}-${data.order_id ?? data.room_id ?? data.quote_session_id ?? 'none'
+    // status ikut di kunci agar notifikasi status berurutan tidak terblokir
+    const key = `${data.type}-${data.status ?? ''}-${data.order_id ?? data.room_id ?? data.quote_session_id ?? 'none'
       }`;
 
     if (handledRef.current === key) {
@@ -337,7 +340,6 @@ function NotificationHandler() {
       if (handledRef.current === key) handledRef.current = null;
     }, 8000);
 
-    // Belum siap navigasi → tahan, proses nanti
     if (!canNavigateRef.current) {
       console.log('[notif] Navigasi belum siap — tap ditahan:', key);
       pendingRef.current = data;
@@ -347,14 +349,11 @@ function NotificationHandler() {
     handleTap(data);
   };
 
-  // Ref ke versi terbaru, supaya listener (dipasang sekali) tidak
-  // memakai closure lama
   const handleTapOnceRef = useRef(handleTapOnce);
   handleTapOnceRef.current = handleTapOnce;
   const handleTapRef = useRef(handleTap);
   handleTapRef.current = handleTap;
 
-  // Pasang listener sekali
   useEffect(() => {
     const responseListener =
       Notifications.addNotificationResponseReceivedListener((response) => {
@@ -379,7 +378,6 @@ function NotificationHandler() {
     };
   }, []);
 
-  // Begitu navigator & onboarding siap → proses tap yang tertahan
   useEffect(() => {
     if (!canNavigate || !pendingRef.current) return;
 
@@ -393,7 +391,7 @@ function NotificationHandler() {
 }
 
 // ============================================================
-// Behavior Tracker (presence + push register)
+// Behavior Tracker
 // ============================================================
 function BehaviorTrackerBootstrap() {
   const pathname = usePathname();
@@ -407,7 +405,6 @@ function BehaviorTrackerBootstrap() {
       const token = await getToken();
       if (cancelled) return;
 
-      // Logout
       if (!token) {
         if (lastTokenRef.current) {
           console.log('[tracker] logout, hentikan tracker');
@@ -418,17 +415,16 @@ function BehaviorTrackerBootstrap() {
         return;
       }
 
-      // Sudah berjalan untuk token ini
       if (token === lastTokenRef.current) return;
       lastTokenRef.current = token;
 
-      console.log('[tracker] login terdeteksi: mulai tracker & register push');
+      console.log(
+        '[tracker] login terdeteksi: mulai tracker & register push'
+      );
 
-      // 1) Presence tracker
       cleanupRef.current?.();
       cleanupRef.current = setupBehaviorTracker();
 
-      // 2) Register push token
       try {
         await registerForPushNotifications();
       } catch (err: any) {
@@ -453,7 +449,6 @@ export default function RootLayout() {
   const [isLoading, setIsLoading] = useState(true);
   const [hasSeenOnboarding, setHasSeenOnboarding] = useState(false);
 
-  // Splash custom
   const [showSplash, setShowSplash] = useState(true);
   const [minTimeDone, setMinTimeDone] = useState(false);
   const nativeHiddenRef = useRef(false);
@@ -464,20 +459,16 @@ export default function RootLayout() {
     SplashScreen.hideAsync().catch(() => { });
   };
 
-  // Durasi minimal splash custom tampil
   useEffect(() => {
     const t = setTimeout(() => setMinTimeDone(true), SPLASH_MIN_DURATION);
     return () => clearTimeout(t);
   }, []);
 
-  // Pengaman: kalau gambar splash gagal/lama dimuat, splash native
-  // tetap disembunyikan supaya app tidak tertahan
   useEffect(() => {
     const t = setTimeout(hideNativeSplash, 3000);
     return () => clearTimeout(t);
   }, []);
 
-  // ✅ Setup channel notifikasi paling awal
   useEffect(() => {
     setupNotifications();
   }, []);
@@ -515,13 +506,10 @@ export default function RootLayout() {
     }
   };
 
-  // Splash custom mulai fade out kalau status onboarding sudah
-  // terbaca DAN durasi minimal sudah lewat
   const splashReady = !isLoading && minTimeDone;
 
   return (
     <View style={{ flex: 1 }}>
-      {/* App baru dirender setelah status onboarding terbaca */}
       {!isLoading && (
         <OrderProvider>
           <OnboardingContext.Provider
@@ -529,25 +517,87 @@ export default function RootLayout() {
           >
             <NotificationHandler />
             <BehaviorTrackerBootstrap />
+
             <Stack screenOptions={{ headerShown: false }}>
+              {/* ============================================================ */}
+              {/* ONBOARDING */}
+              {/* ============================================================ */}
               <Stack.Protected guard={!hasSeenOnboarding}>
                 <Stack.Screen name="onboarding" />
               </Stack.Protected>
 
+              {/* ============================================================ */}
+              {/* MAIN APP */}
+              {/* ============================================================ */}
               <Stack.Protected guard={hasSeenOnboarding}>
+                {/* Auth */}
                 <Stack.Screen name="(auth)" />
+
+                {/* Tabs */}
                 <Stack.Screen name="(tabs)" />
+
+                {/* Services (ojek, food, send) */}
                 <Stack.Screen name="services" />
+
+                {/* WarFood */}
+                <Stack.Screen
+                  name="resto/[id]"
+                  options={{ headerShown: false }}
+                />
+                <Stack.Screen
+                  name="resto-terdekat"
+                  options={{ headerShown: false }}
+                />
+
+                <Stack.Screen
+                  name="checkout"
+                  options={{ headerShown: false }}
+                />
+                <Stack.Screen
+                  name="mencari-driver"
+                  options={{ headerShown: false }}
+                />
+                <Stack.Screen
+                  name="tracking/[orderId]"
+                  options={{ headerShown: false }}
+                />
+                <Stack.Screen
+                  name="rating/[orderId]"
+                  options={{ headerShown: false }}
+                />
+
+                {/* Alamat */}
+                <Stack.Screen
+                  name="pick-address"
+                  options={{ headerShown: false }}
+                />
+
+                {/* Promo & ongkir */}
+                <Stack.Screen
+                  name="ongkir-murah"
+                  options={{ headerShown: false }}
+                />
+                <Stack.Screen
+                  name="promo"
+                  options={{ headerShown: false }}
+                />
+
+                {/* Chat */}
                 <Stack.Screen name="chat/[roomId]" />
+
+                {/* Alamat tersimpan */}
                 <Stack.Screen name="saved-addresses" />
                 <Stack.Screen name="save-address/[kind]" />
+
+
               </Stack.Protected>
             </Stack>
+
+            <NetworkGuard />
           </OnboardingContext.Provider>
         </OrderProvider>
       )}
 
-      {/* Splash custom di atas segalanya */}
       {showSplash && (
         <CustomSplash
           ready={splashReady}

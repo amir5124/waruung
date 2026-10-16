@@ -28,6 +28,8 @@ export type GoSendCourierOption = {
     tariffCode?: string;
 };
 
+export type PaymentMethod = 'cash' | 'wallet' | 'qris' | 'bank_transfer';
+
 export type OrderPayload = {
     origin: PlaceLoc;
     destination: PlaceLoc;
@@ -35,7 +37,12 @@ export type OrderPayload = {
     receiver: ContactInfo | null;
     packageInfo: PackageInfo;
     option: GoSendCourierOption;
+    // pembayaran (konsisten dengan flow ojek)
+    payment_method?: PaymentMethod;
+    bank_code?: string;
 };
+
+export type VehicleType = 'motor' | 'mobil' | 'motor_food';
 
 export type DriverInfo = {
     id: string;
@@ -43,15 +50,24 @@ export type DriverInfo = {
     rating: number;
     totalTrips?: number;
     photoUrl?: string;
-    vehicleType: 'motor' | 'mobil' | 'motor_food';
+    vehicleType: VehicleType;
     vehiclePlate: string;
     vehicleModel: string;
     phone: string;
+    /** Posisi realtime, diperbarui oleh polling di parent */
     coords: Coords;
     etaMinutes: number;
 };
 
-export type DriverStatus = 'searching' | 'pending' | 'accepted' | 'arrived';
+/** Status order dari backend + 'searching' (fase lokal sebelum ada driver) */
+export type DriverStatus =
+    | 'searching'
+    | 'pending'
+    | 'accepted'
+    | 'arrived'
+    | 'in_progress'
+    | 'completed'
+    | 'cancelled';
 
 export type GoSendStep =
     | 'home'
@@ -63,4 +79,11 @@ export type GoSendStep =
     | 'package-options'
     | 'package-size'
     | 'searching-driver'
-    | 'driver-found';
+    | 'driver-found'
+    | 'on-trip'
+    | 'summary';
+
+export type BookPayment = {
+    payment_method: PaymentMethod;
+    bank_code?: string;
+};

@@ -5,7 +5,7 @@ import { useAppAlert } from '@/hooks/use-app-alert';
 import { useUserLocation } from '@/hooks/use-user-location';
 import { api, OrderResponse } from '@/lib/api';
 import { orderStatusToDriverStatus, toUIDriver } from '@/lib/driver-adapter';
-import { reverseGeocode } from '@/services/google-maps';
+import { getRoute, reverseGeocode } from '@/services/google-maps';
 import type {
     ContactInfo,
     DriverInfo,
@@ -33,7 +33,7 @@ import SearchAddressStep, { type SearchField } from './SearchAddressStep';
 import SearchingDriverStep from './SearchingDriverStep';
 import TripSummaryStep from './TripSummaryStep';
 
-type Step = GoSendStep | 'on-trip' | 'summary';
+type Step = GoSendStep;
 
 type Props = {
     onExit: () => void;
@@ -54,7 +54,6 @@ const RECENT_ADDRESSES: PlaceLoc[] = [];
 const POLL_INTERVAL = 3000;
 const FALLBACK_COORDS = { latitude: -7.0185, longitude: 109.7778 };
 
-// Auto-retry lokasi saat status 'error' (selama itu user melihat shimmer)
 const MAX_LOCATION_RETRIES = 3;
 const LOCATION_RETRY_DELAY = 2000;
 
@@ -62,9 +61,6 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
     const location = useUserLocation();
     const { alertState, showAlert, hideAlert } = useAppAlert();
 
-    // ============================================================
-    // Guard global dari context (bukan ref per-mount)
-    // ============================================================
     const {
         activeOrderId,
         setActiveOrder,
@@ -86,8 +82,6 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
     const [sender, setSender] = useState<ContactInfo | null>(null);
     const [receiver, setReceiver] = useState<ContactInfo | null>(null);
     const [packageInfo, setPackageInfo] = useState<PackageInfo>(EMPTY_PACKAGE);
-
-    // ⬇️ BARU: field mana yang sedang di-edit di SearchAddressStep / PickOnMapStep
     const [focusField, setFocusField] = useState<SearchField>('destination');
 
     // ---- Order & driver ----
@@ -97,17 +91,22 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
     const [orderPayload, setOrderPayload] = useState<GoSendOrder | null>(null);
     const [selectedOption, setSelectedOption] =
         useState<GoSendCourierOption | null>(null);
-
-    // securityCode dari backend, bukan random
     const [securityCode, setSecurityCode] = useState<string | null>(null);
 
-    // ---- Booting dari notifikasi ----
     const [bootingFromNotif, setBootingFromNotif] = useState(false);
 
     // ---- Refs ----
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const pollTokenRef = useRef(0); // ✅ FIX: cegah hasil request lama menimpa state
+    const inFlightRef = useRef(false); // ✅ FIX: cegah polling tumpang tindih
     const stepRef = useRef<Step>('home');
     stepRef.current = step;
+    // ✅ FIX: ref agar fungsi batal tidak memakai closure lama
+    const orderIdRef = useRef<number | null>(null);
+    orderIdRef.current = orderId;
+    // ✅ FIX: user batal saat createOrder masih berjalan
+    const cancelPendingRef = useRef(false);
+    const bookingRef = useRef(false);
 
     // ============================================================
     // GPS -> reverse geocode (asal otomatis)
@@ -142,7 +141,7 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
     }, [location.status, location.coords, bootingFromNotif, orderId]);
 
     // ============================================================
-    // Auto-retry lokasi saat status 'error' (maks MAX_LOCATION_RETRIES)
+    // Auto-retry lokasi saat status 'error'
     // ============================================================
     useEffect(() => {
         if (origin) {
@@ -162,7 +161,115 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
     }, [origin, location.status, locationRetry]);
 
     // ============================================================
-    // BOOT dari notifikasi — pakai guard dari context
+    // Polling terpusat
+    // ============================================================
+    const stopPolling = () => {
+        pollTokenRef.current += 1;
+        inFlightRef.current = false;
+        if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+        }
+    };
+
+    /**
+     * ✅ FIX: perbarui driver tanpa membuat objek baru tiap tick.
+     * Kalau driver sama, hanya koordinat yang diganti (dan hanya bila berubah),
+     * supaya marker di OnTripStep bergerak halus dan tidak re-render sia-sia.
+     */
+    const applyDriver = (apiDriver: NonNullable<OrderResponse['driver']>) => {
+        const next = toUIDriver(apiDriver);
+        setDriver((prev) => {
+            if (!prev || prev.id !== next.id) return next;
+            const c = next.coords;
+            if (
+                !c ||
+                (prev.coords?.latitude === c.latitude &&
+                    prev.coords?.longitude === c.longitude)
+            ) {
+                return prev;
+            }
+            return { ...prev, coords: c };
+        });
+    };
+
+    const startPolling = (id: number) => {
+        stopPolling();
+        const token = pollTokenRef.current;
+
+        pollRef.current = setInterval(async () => {
+            if (inFlightRef.current) return;
+            inFlightRef.current = true;
+
+            try {
+                const order = await api.getOrder(id);
+                if (token !== pollTokenRef.current) return;
+
+                const cur = stepRef.current;
+
+                // Perbarui driver untuk semua status yang punya driver
+                if (
+                    order.driver &&
+                    (order.status === 'accepted' ||
+                        order.status === 'arrived' ||
+                        order.status === 'in_progress' ||
+                        order.status === 'completed')
+                ) {
+                    applyDriver(order.driver);
+                    setDriverStatus(orderStatusToDriverStatus(order.status));
+                }
+
+                switch (order.status) {
+                    case 'accepted':
+                    case 'arrived':
+                        if (cur === 'searching-driver') setStep('driver-found');
+                        break;
+
+                    case 'in_progress':
+                        if (
+                            cur === 'searching-driver' ||
+                            cur === 'driver-found'
+                        ) {
+                            setStep('on-trip');
+                        }
+                        break;
+
+                    case 'completed':
+                        if (
+                            cur === 'searching-driver' ||
+                            cur === 'driver-found' ||
+                            cur === 'on-trip'
+                        ) {
+                            stopPolling();
+                            setStep('summary');
+                        }
+                        break;
+
+                    case 'cancelled':
+                        stopPolling();
+                        showAlert(
+                            'Pesanan dibatalkan',
+                            order.cancellation_reason ??
+                            'Tidak ada driver yang menerima.'
+                        );
+                        setOrderId(null);
+                        setDriver(null);
+                        setDriverStatus('searching');
+                        setStep('delivery-detail');
+                        break;
+                }
+            } catch (err: any) {
+                console.warn('[GOSENDFLOW] Polling error:', err.message);
+            } finally {
+                if (token === pollTokenRef.current) inFlightRef.current = false;
+            }
+        }, POLL_INTERVAL);
+    };
+
+    useEffect(() => () => stopPolling(), []);
+
+    // ============================================================
+    // BOOT dari notifikasi
     // ============================================================
     useEffect(() => {
         if (!activeOrderId) return;
@@ -170,16 +277,15 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
         if (bootingOrderId === activeOrderId) return;
         if (bootingOrderId !== null) return;
 
+        const bootId = activeOrderId;
+
         const boot = async () => {
-            setBootingOrderId(activeOrderId);
+            setBootingOrderId(bootId);
             setBootingFromNotif(true);
-            console.log(
-                '[GOSENDFLOW] Boot dari notif, order id:',
-                activeOrderId
-            );
+            console.log('[GOSENDFLOW] Boot dari notif, order id:', bootId);
 
             try {
-                const order: OrderResponse = await api.getOrder(activeOrderId);
+                const order: OrderResponse = await api.getOrder(bootId);
                 console.log(
                     '[GOSENDFLOW] Order dari notif:',
                     order.status,
@@ -189,17 +295,14 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                 const pickupCoords = order.pickup_coords ?? FALLBACK_COORDS;
                 const dropoffCoords = order.dropoff_coords ?? FALLBACK_COORDS;
 
-                // mapping packageInfo dari backend (bukan EMPTY_PACKAGE)
                 const bootPackageInfo: PackageInfo = {
                     type: order.package_type ?? null,
                     size: (order.package_size as any) ?? null,
                     weight: order.package_weight ?? null,
-                    protection:
-                        (order.package_protection as any) ?? 'silver',
+                    protection: (order.package_protection as any) ?? 'silver',
                     receiveCode: !!order.send_code,
                 };
 
-                // mapping sender/receiver dari backend
                 const bootSender: ContactInfo | null = order.sender_phone
                     ? {
                         name: order.sender_name ?? '',
@@ -216,6 +319,13 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                     }
                     : null;
 
+                const bootOption: GoSendCourierOption = {
+                    id: order.tariff_code ?? '',
+                    name: order.option_name ?? '',
+                    eta: '',
+                    price: order.total_fare ?? 0,
+                };
+
                 const payload: GoSendOrder = {
                     origin: {
                         name: order.pickup_name ?? '',
@@ -227,83 +337,64 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                         address: order.dropoff_address ?? '',
                         coords: dropoffCoords,
                     },
-                    option: {
-                        id: order.tariff_code ?? '',
-                        name: order.option_name ?? '',
-                        eta: '',
-                        price: order.total_fare ?? 0,
-                    },
+                    option: bootOption,
                     packageInfo: bootPackageInfo,
                     sender: bootSender,
                     receiver: bootReceiver,
                 };
 
+                // ✅ FIX: order selesai/batal tidak perlu memuat state penuh
+                if (order.status === 'cancelled') {
+                    setStep('home');
+                    setBootedOrderId(bootId);
+                    return;
+                }
+
                 setOrderPayload(payload);
-                setOrderId(activeOrderId);
+                setOrderId(bootId);
                 setOrigin(payload.origin);
                 setDestination(payload.destination);
                 setPackageInfo(bootPackageInfo);
                 setSender(bootSender);
                 setReceiver(bootReceiver);
-                originEdited.current = true;
-
-                // securityCode dari backend
+                setSelectedOption(bootOption);
                 setSecurityCode(order.send_code ?? null);
-
-                // set selectedOption biar summary ada price
-                setSelectedOption({
-                    id: order.tariff_code ?? '',
-                    name: order.option_name ?? '',
-                    eta: '',
-                    price: order.total_fare ?? 0,
-                });
+                originEdited.current = true;
 
                 if (order.driver) {
                     setDriver(toUIDriver(order.driver));
-                    setDriverStatus(
-                        orderStatusToDriverStatus(order.status)
-                    );
+                    setDriverStatus(orderStatusToDriverStatus(order.status));
                 }
 
-                // Peta step
                 switch (order.status) {
                     case 'pending':
                         setStep('searching-driver');
-                        startPolling(activeOrderId);
+                        startPolling(bootId);
                         break;
                     case 'accepted':
-                    case 'arrived': // arrived = driver di pickup, TETAP di driver-found
+                    case 'arrived':
                         setStep('driver-found');
-                        startPolling(activeOrderId);
+                        startPolling(bootId);
                         break;
-                    case 'in_progress': // hanya in_progress yang pindah ke on-trip
+                    case 'in_progress':
                         setStep('on-trip');
-                        startPolling(activeOrderId);
+                        startPolling(bootId);
                         break;
                     case 'completed':
                         setStep('summary');
-                        break;
-                    case 'cancelled':
-                        setStep('home');
                         break;
                     default:
                         setStep('home');
                 }
 
-                setBootedOrderId(activeOrderId);
-                console.log(
-                    '[GOSENDFLOW] Boot selesai, status:',
-                    order.status
-                );
+                setBootedOrderId(bootId);
+                console.log('[GOSENDFLOW] Boot selesai, status:', order.status);
             } catch (err: any) {
-                console.error(
-                    '[GOSENDFLOW] Gagal boot dari notif:',
-                    err.message
-                );
-                showAlert(
-                    'Gagal Buka Order',
-                    err.message || 'Coba buka manual.'
-                );
+                console.error('[GOSENDFLOW] Gagal boot dari notif:', err.message);
+                showAlert('Gagal Buka Order', err.message || 'Coba buka manual.');
+                // ✅ FIX: tandai sudah dicoba & hentikan trigger agar tidak looping
+                setBootedOrderId(bootId);
+                setActiveOrder(null);
             } finally {
                 setBootingFromNotif(false);
                 setBootingOrderId(null);
@@ -330,77 +421,97 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
     }, [bootedOrderId, setBootedOrderId]);
 
     // ============================================================
-    // Polling terpusat
+    // ✅ FIX: pengaman, data step belum lengkap → jangan layar putih
     // ============================================================
-    const stopPolling = () => {
-        if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
+    useEffect(() => {
+        if (bootingFromNotif || !origin) return;
+
+        const missing =
+            (['delivery-detail', 'dropoff-form', 'searching-driver', 'on-trip', 'summary'].includes(step) &&
+                !destination) ||
+            (step === 'driver-found' && (!driver || !orderPayload)) ||
+            ((step === 'on-trip' || step === 'summary') && !driver);
+
+        if (missing) {
+            console.warn('[GOSENDFLOW] Data step', step, 'belum lengkap → home');
+            stopPolling();
+            setStep('home');
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [step, origin, destination, driver, orderPayload, bootingFromNotif]);
+
+    // ============================================================
+    // Pembatalan
+    // ============================================================
+    const resetOrderState = () => {
+        setDriver(null);
+        setDriverStatus('searching');
+        setOrderId(null);
+        setStep('delivery-detail');
+    };
+
+    /** Batalkan order di server (aman dipanggil walau orderId belum ada) */
+    const cancelOrderOnServer = async (reason: string) => {
+        const id = orderIdRef.current;
+        if (!id) {
+            // createOrder masih berjalan: batalkan begitu order terbentuk
+            if (bookingRef.current) cancelPendingRef.current = true;
+            return;
+        }
+        try {
+            await api.updateOrderStatus(id, 'cancelled', reason);
+        } catch (err: any) {
+            console.warn('[GOSENDFLOW] Gagal cancel:', err.message);
         }
     };
 
-    const startPolling = (id: number) => {
+    // Dipakai tombol "Batalkan pengiriman" di SearchingDriverStep (sudah ada konfirmasi sendiri)
+    const doCancelSearching = async () => {
         stopPolling();
-        pollRef.current = setInterval(async () => {
-            try {
-                const order = await api.getOrder(id);
-                console.log('[GOSENDFLOW] Polling:', order.status, {
-                    driver_name: order.driver?.full_name,
-                });
-
-                // ---- Driver accepted / arrived / in_progress ----
-                if (
-                    order.driver &&
-                    (order.status === 'accepted' ||
-                        order.status === 'arrived' ||
-                        order.status === 'in_progress')
-                ) {
-                    setDriver(toUIDriver(order.driver));
-                    setDriverStatus(
-                        orderStatusToDriverStatus(order.status)
-                    );
-
-                    if (stepRef.current === 'searching-driver') {
-                        setStep('driver-found');
-                    }
-                }
-
-                // ---- in_progress -> on-trip ----
-                if (
-                    order.status === 'in_progress' &&
-                    stepRef.current === 'driver-found'
-                ) {
-                    setStep('on-trip');
-                }
-
-                // ---- completed ----
-                if (
-                    order.status === 'completed' &&
-                    stepRef.current === 'on-trip'
-                ) {
-                    stopPolling();
-                    setStep('summary');
-                }
-
-                // ---- cancelled ----
-                if (order.status === 'cancelled') {
-                    stopPolling();
-                    showAlert(
-                        'Pesanan dibatalkan',
-                        order.cancellation_reason ??
-                        'Tidak ada driver yang menerima.'
-                    );
-                    setOrderId(null);
-                    setDriver(null);
-                    setStep('delivery-detail');
-                }
-            } catch (err: any) {
-                console.warn('[GOSENDFLOW] Polling error:', err.message);
-            }
-        }, POLL_INTERVAL);
+        await cancelOrderOnServer('user_cancel');
+        resetOrderState();
     };
 
-    useEffect(() => () => stopPolling(), []);
+    // ✅ FIX: tombol back / hardware back saat mencari driver → konfirmasi + batalkan di server
+    const askCancelSearching = () => {
+        showAlert(
+            'Batalkan pencarian?',
+            'Pesananmu akan dibatalkan dan kamu kembali ke detail pengiriman.',
+            [
+                { text: 'Tidak', style: 'cancel' },
+                {
+                    text: 'Ya, batalkan',
+                    style: 'destructive',
+                    onPress: doCancelSearching,
+                },
+            ]
+        );
+    };
+
+    const confirmCancel = () => {
+        showAlert(
+            'Batalkan pesanan?',
+            'Driver sudah dalam perjalanan ke lokasi jemputmu.',
+            [
+                { text: 'Tidak', style: 'cancel' },
+                {
+                    text: 'Ya, batalkan',
+                    style: 'destructive',
+                    onPress: async () => {
+                        stopPolling();
+                        await cancelOrderOnServer('Dibatalkan oleh customer');
+                        resetOrderState();
+                    },
+                },
+            ]
+        );
+    };
+
+    // ✅ FIX: simpan versi terbaru di ref agar back handler tidak basi
+    const confirmCancelRef = useRef(confirmCancel);
+    confirmCancelRef.current = confirmCancel;
+    const askCancelSearchingRef = useRef(askCancelSearching);
+    askCancelSearchingRef.current = askCancelSearching;
 
     // ============================================================
     // BackHandler Android
@@ -415,25 +526,26 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
             'dropoff-form': 'pickup-form',
             'package-options': 'dropoff-form',
             'package-size': 'delivery-detail',
-            'searching-driver': 'delivery-detail',
+            'searching-driver': null, // ditangani khusus di bawah
             'driver-found': null,
             'on-trip': null,
             summary: null,
         };
-        const sub = BackHandler.addEventListener(
-            'hardwareBackPress',
-            () => {
-                if (step === 'driver-found') {
-                    confirmCancel();
-                    return true;
-                }
-                if (step === 'on-trip' || step === 'summary') return true;
-                const prev = back[step];
-                if (prev) setStep(prev);
-                else onExit();
+        const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+            if (step === 'searching-driver') {
+                askCancelSearchingRef.current();
                 return true;
             }
-        );
+            if (step === 'driver-found') {
+                confirmCancelRef.current();
+                return true;
+            }
+            if (step === 'on-trip' || step === 'summary') return true;
+            const prev = back[step];
+            if (prev) setStep(prev);
+            else onExit();
+            return true;
+        });
         return () => sub.remove();
     }, [step, onExit]);
 
@@ -446,47 +558,9 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
         setDestination(origin);
     };
 
-    const handlePackageContinue = (
-        type: string,
-        protection: ProtectionType
-    ) => {
+    const handlePackageContinue = (type: string, protection: ProtectionType) => {
         setPackageInfo((p) => ({ ...p, type, protection }));
         setStep('delivery-detail');
-    };
-
-    const confirmCancel = () => {
-        showAlert(
-            'Batalkan pesanan?',
-            'Driver sudah dalam perjalanan ke lokasi jemputmu.',
-            [
-                { text: 'Tidak', style: 'cancel' },
-                {
-                    text: 'Ya, batalkan',
-                    style: 'destructive',
-                    onPress: async () => {
-                        if (orderId) {
-                            try {
-                                await api.updateOrderStatus(
-                                    orderId,
-                                    'cancelled',
-                                    'Dibatalkan oleh customer'
-                                );
-                            } catch (err: any) {
-                                console.warn(
-                                    '[GOSENDFLOW] Gagal cancel:',
-                                    err.message
-                                );
-                            }
-                        }
-                        stopPolling();
-                        setDriver(null);
-                        setDriverStatus('searching');
-                        setOrderId(null);
-                        setStep('delivery-detail');
-                    },
-                },
-            ]
-        );
     };
 
     const openChat = async () => {
@@ -507,10 +581,14 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
     };
 
     /**
-     * Booking: kirim order ke backend, simpan orderId, mulai polling.
+     * Booking: hitung jarak asli, kirim order, simpan orderId, mulai polling.
      */
     const handleBook = async (option: GoSendCourierOption) => {
         if (!destination || !origin) return;
+        if (bookingRef.current) return; // ✅ FIX: cegah tap ganda
+
+        bookingRef.current = true;
+        cancelPendingRef.current = false;
 
         const payload: GoSendOrder = {
             origin,
@@ -528,6 +606,19 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
         onOrder(payload);
 
         try {
+            // ✅ FIX: jarak & durasi dari rute asli (sebelumnya hardcode 3 km)
+            let distanceKm = 3;
+            let durationMin = 10;
+            try {
+                const r = await getRoute(origin.coords, destination.coords);
+                if (r?.distanceMeters > 0) {
+                    distanceKm = r.distanceMeters / 1000;
+                    durationMin = Math.max(1, Math.ceil(r.durationSec / 60));
+                }
+            } catch (err: any) {
+                console.warn('[GOSENDFLOW] getRoute gagal, pakai default:', err?.message);
+            }
+
             const order: OrderResponse = await api.createOrder({
                 type: 'send',
                 pickup_name: origin.name,
@@ -538,8 +629,8 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                 dropoff_address: destination.address,
                 dropoff_lat: destination.coords.latitude,
                 dropoff_lng: destination.coords.longitude,
-                distance_km: 3, // TODO: pakai getRoute()
-                duration_min: 10,
+                distance_km: distanceKm,
+                duration_min: durationMin,
                 payment_method: 'cash',
                 tariff_code: option.id,
                 option_name: option.name,
@@ -549,8 +640,6 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                 sender_phone: sender?.phone,
                 sender_landmark: sender?.landmark ?? undefined,
                 receiver_landmark: receiver?.landmark ?? undefined,
-
-                // kirim info paket ke backend
                 package_type: packageInfo.type ?? undefined,
                 package_size: packageInfo.size ?? undefined,
                 package_weight: packageInfo.weight ?? undefined,
@@ -562,37 +651,36 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                 tariff_code: order.tariff_code,
                 send_code: order.send_code,
                 delivery_fee: order.delivery_fee,
-                package_type: order.package_type,
-                package_size: order.package_size,
             });
 
+            // ✅ FIX: user sudah batal selagi order dibuat → batalkan di server
+            if (cancelPendingRef.current) {
+                cancelPendingRef.current = false;
+                try {
+                    await api.updateOrderStatus(order.id, 'cancelled', 'user_cancel');
+                } catch (err: any) {
+                    console.warn('[GOSENDFLOW] Gagal cancel order baru:', err.message);
+                }
+                return;
+            }
+
             setOrderId(order.id);
-
-            // securityCode dari backend
             setSecurityCode(order.send_code ?? null);
-
             startPolling(order.id);
 
-            // Kalau backend sudah langsung assign driver
             if (order.driver) {
                 setDriver(toUIDriver(order.driver));
-                setDriverStatus(
-                    orderStatusToDriverStatus(order.status)
-                );
+                setDriverStatus(orderStatusToDriverStatus(order.status));
                 setStep('driver-found');
             }
         } catch (err: any) {
-            showAlert(
-                'Gagal membuat pesanan',
-                err.message || 'Coba lagi.'
-            );
+            showAlert('Gagal membuat pesanan', err.message || 'Coba lagi.');
             setStep('delivery-detail');
+        } finally {
+            bookingRef.current = false;
         }
     };
 
-    /**
-     * Selesai lihat ringkasan (rating / skip) -> reset & kembali ke home.
-     */
     const finishDelivery = () => {
         stopPolling();
         setOrderPayload(null);
@@ -615,7 +703,6 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
         return (
             <View style={s.bootCenter}>
                 <ActivityIndicator size="large" color={colors.primary} />
-
             </View>
         );
     }
@@ -624,13 +711,10 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
     // Origin belum siap
     // ============================================================
     if (!origin) {
-        // 1) Gagal reverse geocode -> kasih tombol coba lagi
         if (location.status === 'granted' && geocodeError && !geocoding) {
             return (
                 <View style={s.center}>
-                    <Text style={s.hint}>
-                        Gagal mendapatkan alamat lokasimu.
-                    </Text>
+                    <Text style={s.hint}>Gagal mendapatkan alamat lokasimu.</Text>
                     <Text
                         style={s.action}
                         onPress={() => {
@@ -644,13 +728,11 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
             );
         }
 
-        // 2) Masalah izin / GPS -> user harus bertindak, pesan tetap ditampilkan
         const PERMISSION_MESSAGES: Record<string, string> = {
-            denied: 'Izinkan akses lokasi supaya kami bisa menentukan titik pengambilan paketmu.',
-            blocked:
-                'Akses lokasi dimatikan. Aktifkan lewat pengaturan aplikasi.',
-            'services-off':
-                'GPS di HP kamu mati. Nyalakan dulu, lalu coba lagi.',
+            denied:
+                'Izinkan akses lokasi supaya kami bisa menentukan titik pengambilan paketmu.',
+            blocked: 'Akses lokasi dimatikan. Aktifkan lewat pengaturan aplikasi.',
+            'services-off': 'GPS di HP kamu mati. Nyalakan dulu, lalu coba lagi.',
         };
 
         const permissionMessage = PERMISSION_MESSAGES[location.status];
@@ -667,24 +749,16 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                                 : location.refresh
                         }
                     >
-                        {location.status === 'blocked'
-                            ? 'Buka pengaturan'
-                            : 'Coba lagi'}
+                        {location.status === 'blocked' ? 'Buka pengaturan' : 'Coba lagi'}
                     </Text>
                 </View>
             );
         }
 
-        // 3) Error lokasi & auto-retry sudah habis -> baru tampilkan pesan
-        if (
-            location.status === 'error' &&
-            locationRetry >= MAX_LOCATION_RETRIES
-        ) {
+        if (location.status === 'error' && locationRetry >= MAX_LOCATION_RETRIES) {
             return (
                 <View style={s.center}>
-                    <Text style={s.hint}>
-                        Belum bisa mendapatkan lokasimu.
-                    </Text>
+                    <Text style={s.hint}>Belum bisa mendapatkan lokasimu.</Text>
                     <Text
                         style={s.action}
                         onPress={() => {
@@ -698,7 +772,6 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
             );
         }
 
-        // 4) Semua status lain (loading / error sedang retry / geocoding) -> shimmer
         return (
             <HomeStep
                 origin={null}
@@ -741,18 +814,14 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                 <SearchAddressStep
                     origin={origin}
                     destination={destination}
-                    onBack={() =>
-                        setStep(destination ? 'delivery-detail' : 'home')
-                    }
+                    onBack={() => setStep(destination ? 'delivery-detail' : 'home')}
                     onSwap={handleSwap}
                     onPickOnMap={(field) => {
-                        // ⬇️ Tentukan field mana yang akan diedit
                         setFocusField(field);
                         setStep('pick-map');
                     }}
                     recentAddresses={RECENT_ADDRESSES}
                     onSelectOrigin={(place) => {
-                        // ⬇️ Edit origin
                         originEdited.current = true;
                         setOrigin(place);
                     }}
@@ -782,10 +851,7 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                     }
                     onPressPackageSize={() => setStep('package-size')}
                     onToggleReceiveCode={(value) =>
-                        setPackageInfo((p) => ({
-                            ...p,
-                            receiveCode: value,
-                        }))
+                        setPackageInfo((p) => ({ ...p, receiveCode: value }))
                     }
                     onBook={handleBook}
                 />
@@ -860,33 +926,14 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
             content = (
                 <SearchingDriverStep
                     origin={origin}
-                    onBack={() => {
-                        stopPolling();
-                        setOrderId(null);
-                        setStep('delivery-detail');
-                    }}
-                    onCancelConfirmed={async () => {
-                        if (orderId) {
-                            try {
-                                await api.updateOrderStatus(
-                                    orderId,
-                                    'cancelled',
-                                    'user_cancel'
-                                );
-                            } catch (e) {
-                                console.warn(
-                                    '[GOSENDFLOW] Cancel gagal:',
-                                    e
-                                );
-                            }
-                        }
-                        stopPolling();
-                        setOrderId(null);
-                        setStep('delivery-detail');
-                    }}
+                    // ✅ FIX: back membatalkan order di server (dengan konfirmasi)
+                    onBack={askCancelSearching}
+                    onCancelConfirmed={doCancelSearching}
                     onDriverFound={() => {
                         // no-op: pindah step ditentukan polling
                     }}
+                    // ✅ FIX: matikan timer simulasi, pakai polling backend
+                    searchDelayMs={999_999}
                 />
             );
             break;
@@ -898,22 +945,14 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                     order={orderPayload}
                     driver={driver}
                     status={driverStatus}
-                    securityCode={
-                        packageInfo.receiveCode ? securityCode : null
-                    }
+                    securityCode={packageInfo.receiveCode ? securityCode : null}
                     onBack={confirmCancel}
                     onCancel={confirmCancel}
-                    onCall={() =>
-                        console.log('[GOSENDFLOW] Call driver')
-                    }
+                    onCall={() => console.log('[GOSENDFLOW] Call driver')}
                     onChat={openChat}
                     onArrived={() => {
-                        // JANGAN pindah step.
-                        // Driver "sampai" hanya status tampilan; pindah ke on-trip
-                        // tetap menunggu polling deteksi 'in_progress'.
-                        console.log(
-                            '[GOSENDFLOW] Driver tiba di pickup (nunggu driver ambil paket)'
-                        );
+                        // Jangan pindah step; pindah ke on-trip menunggu polling 'in_progress'
+                        console.log('[GOSENDFLOW] Driver tiba di pickup');
                     }}
                 />
             );
@@ -925,20 +964,19 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                 <OnTripStep
                     origin={origin}
                     destination={destination}
-                    driver={driver}
+                    driver={driver} // driver.coords realtime dari polling
+                    status={driverStatus} // ✅ FIX: diteruskan ke OnTripStep
                     securityCode={securityCode ?? undefined}
                     receiveCode={packageInfo.receiveCode}
+                    packageInfo={packageInfo}
+                    price={selectedOption?.price}
+                    optionName={selectedOption?.name}
                     onBack={() => { }}
                     onArrived={() => {
-                        // JANGAN pindah step.
-                        // Pindah ke summary hanya saat polling dapat status 'completed'.
-                        console.log(
-                            '[GOSENDFLOW] OnTrip simulasi selesai (nunggu backend)'
-                        );
+                        // Pindah ke summary dilakukan polling saat 'completed'
+                        console.log('[GOSENDFLOW] Order selesai (status completed)');
                     }}
-                    onCall={() =>
-                        console.log('[GOSENDFLOW] Call driver')
-                    }
+                    onCall={() => console.log('[GOSENDFLOW] Call driver')}
                     onChat={openChat}
                 />
             );
@@ -979,7 +1017,6 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
         case 'pick-map':
             content = (
                 <PickOnMapStep
-                    // ⬇️ Tentukan koordinat awal berdasarkan field yang sedang di-edit
                     initialCoords={
                         focusField === 'origin'
                             ? origin.coords
@@ -987,17 +1024,10 @@ export default function GoSendFlow({ onExit, onOrder }: Props) {
                     }
                     onBack={() => setStep('search-destination')}
                     onConfirm={(place) => {
-                        // ⬇️ Update field yang sesuai
                         if (focusField === 'origin') {
                             originEdited.current = true;
                             setOrigin(place);
-                            // Kalau destination sudah ada, langsung ke detail
-                            // Kalau belum, balik ke search untuk pilih destination
-                            setStep(
-                                destination
-                                    ? 'delivery-detail'
-                                    : 'search-destination'
-                            );
+                            setStep(destination ? 'delivery-detail' : 'search-destination');
                         } else {
                             setDestination(place);
                             setStep('delivery-detail');
@@ -1054,9 +1084,5 @@ const s = {
         alignItems: 'center' as const,
         justifyContent: 'center' as const,
         gap: 12,
-    },
-    bootText: {
-        color: colors.textMuted,
-        fontSize: 13,
     },
 };

@@ -1,15 +1,28 @@
+// components/ojek/HomeStep.tsx
 import { colors } from '@/constants/ojek-theme';
 import type { SavedKind } from '@/hooks/use-saved-addresses';
 import type { UserLocationState } from '@/hooks/use-user-location';
+import type { PublicAsset } from '@/lib/api';
 import type { PlaceLoc, ServiceType } from '@/types/ojek';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import React from 'react';
-import { Image, ImageBackground, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+    Image,
+    ImageBackground,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    View,
+} from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LocationPreview } from './LocationPreview';
 import { CircleButton, PinDot } from './parts';
 
+// ============================================================
+// TYPES
+// ============================================================
 type Props = {
     serviceType: ServiceType;
     userName?: string;
@@ -22,48 +35,131 @@ type Props = {
     onPressSaved: (kind: SavedKind) => void;
     /** ikon pensil pada chip yang sudah tersimpan */
     onEditSaved: (kind: SavedKind) => void;
+    /** ✅ background assets dari parent (OjekFlow) */
+    bgAssets?: PublicAsset[];
 };
 
+// ============================================================
+// CONSTANTS
+// ============================================================
 const SERVICE_ICONS: Record<ServiceType, any> = {
     motor: require('@/assets/images/motor.png'),
     mobil: require('@/assets/images/mobil.png'),
 };
 
-const SERVICE_BG: Record<ServiceType, any> = {
+const SERVICE_BG_FALLBACK: Record<ServiceType, any> = {
     motor: require('@/assets/images/bg-ojek.png'),
     mobil: require('@/assets/images/bg-mobil.png'),
 };
 
-const COPY: Record<ServiceType, { title: string; promoTitle: string; promoSub: string }> = {
-    motor: { title: 'Ojek Motor', promoTitle: 'Beli paket hemat sekarang!', promoSub: 'Ongkos lebih murah tiap hari' },
-    mobil: { title: 'Ojek Mobil', promoTitle: 'Bawa keluarga, lebih hemat!', promoSub: 'Muat sampai 6 penumpang' },
+const SERVICE_BG_KEY: Record<ServiceType, string> = {
+    motor: 'bg_ojek',
+    mobil: 'bg_mobil',
 };
 
+const COPY: Record<
+    ServiceType,
+    { title: string; promoTitle: string; promoSub: string }
+> = {
+    motor: {
+        title: 'Ojek Motor',
+        promoTitle: 'Beli paket hemat sekarang!',
+        promoSub: 'Ongkos lebih murah tiap hari',
+    },
+    mobil: {
+        title: 'Ojek Mobil',
+        promoTitle: 'Bawa keluarga, lebih hemat!',
+        promoSub: 'Muat sampai 6 penumpang',
+    },
+};
+
+// ============================================================
+// HELPER — cari asset berdasarkan prefix
+// ============================================================
+function findAssetByPrefix(
+    assets: PublicAsset[],
+    prefix: string
+): PublicAsset | undefined {
+    if (!assets || assets.length === 0) return undefined;
+
+    // 1. Exact match
+    const exact = assets.find((a) => a.key === prefix);
+    if (exact) return exact;
+
+    // 2. Prefix match (mis. "bg_ojek_1791964192550-hb300k")
+    return assets.find((a) => a.key.startsWith(prefix + '_'));
+}
+
+// ============================================================
+// SUB-COMPONENT — SavedChip
+// ============================================================
 function SavedChip({
-    kind, place, onPress, onEdit,
+    kind,
+    place,
+    onPress,
+    onEdit,
 }: {
-    kind: SavedKind; place?: PlaceLoc | null; onPress: () => void; onEdit: () => void;
+    kind: SavedKind;
+    place?: PlaceLoc | null;
+    onPress: () => void;
+    onEdit: () => void;
 }) {
     const icon = kind === 'home' ? 'home' : 'briefcase';
     const empty = kind === 'home' ? 'Simpan Rumah' : 'Simpan Kantor';
     return (
         <Pressable style={s.pill} onPress={onPress}>
-            <Ionicons name={icon} size={18} color={place ? colors.primary : colors.text} />
-            <Text style={s.pillText} numberOfLines={1}>{place ? place.name : empty}</Text>
+            <Ionicons
+                name={icon}
+                size={18}
+                color={place ? colors.primary : colors.text}
+            />
+            <Text style={s.pillText} numberOfLines={1}>
+                {place ? place.name : empty}
+            </Text>
             {place && (
                 <Pressable onPress={onEdit} hitSlop={10}>
-                    <Ionicons name="create-outline" size={18} color={colors.textMuted} />
+                    <Ionicons
+                        name="create-outline"
+                        size={18}
+                        color={colors.textMuted}
+                    />
                 </Pressable>
             )}
         </Pressable>
     );
 }
 
+// ============================================================
+// MAIN COMPONENT
+// ============================================================
 export default function HomeStep({
-    serviceType, userName, location, savedHome, savedOffice, onBack, onPressSearch, onPressSaved, onEditSaved,
+    serviceType,
+    userName,
+    location,
+    savedHome,
+    savedOffice,
+    onBack,
+    onPressSearch,
+    onPressSaved,
+    onEditSaved,
+    bgAssets = [],
 }: Props) {
     const insets = useSafeAreaInsets();
     const copy = COPY[serviceType];
+
+    // ✅ Hitung bg source dari prop
+    const bgKey = SERVICE_BG_KEY[serviceType];
+    const bgAsset = findAssetByPrefix(bgAssets, bgKey);
+    const bgSource = bgAsset
+        ? { uri: bgAsset.url }
+        : SERVICE_BG_FALLBACK[serviceType];
+
+    console.log(
+        `[HomeStep] bg ${serviceType} (${bgKey}):`,
+        bgAsset ? '✅ from backend' : '⚠️ fallback',
+        '| total assets:',
+        bgAssets.length
+    );
 
     return (
         <View style={{ flex: 1, backgroundColor: '#fff' }}>
@@ -72,20 +168,38 @@ export default function HomeStep({
                 overScrollMode="never"
                 showsVerticalScrollIndicator={false}
                 keyboardShouldPersistTaps="handled"
-                contentContainerStyle={{ flexGrow: 1, backgroundColor: colors.homeBg }}
+                contentContainerStyle={{
+                    flexGrow: 1,
+                    backgroundColor: colors.homeBg,
+                }}
             >
                 <ImageBackground
-                    source={SERVICE_BG[serviceType]}
+                    source={bgSource}
                     resizeMode="cover"
-                    style={{ height: 180 + insets.top, justifyContent: 'flex-end' }}
+                    style={{
+                        height: 180 + insets.top,
+                        justifyContent: 'flex-end',
+                    }}
                 >
-                    <Animated.View entering={FadeInDown.delay(100).duration(400)} style={s.greetWrap}>
-                        <Text style={s.greet}>{userName ? `Siap berangkat hari ini, ${userName}?` : 'Siap berangkat hari ini?'}</Text>
-                        <Text style={s.greetSub}>Semoga harimu lancar. Yuk, {copy.title.toLowerCase()}!</Text>
+                    <Animated.View
+                        entering={FadeInDown.delay(100).duration(400)}
+                        style={s.greetWrap}
+                    >
+                        <Text style={s.greet}>
+                            {userName
+                                ? `Siap berangkat hari ini, ${userName}?`
+                                : 'Siap berangkat hari ini?'}
+                        </Text>
+                        <Text style={s.greetSub}>
+                            Semoga harimu lancar. Yuk, {copy.title.toLowerCase()}!
+                        </Text>
                     </Animated.View>
                 </ImageBackground>
 
-                <Animated.View entering={FadeInDown.delay(200).duration(400)} style={s.promo}>
+                <Animated.View
+                    entering={FadeInDown.delay(200).duration(400)}
+                    style={s.promo}
+                >
                     <View style={s.promoIcon}>
                         <Image
                             source={SERVICE_ICONS[serviceType]}
@@ -97,7 +211,11 @@ export default function HomeStep({
                         <Text style={s.promoTitle}>{copy.promoTitle}</Text>
                         <Text style={s.promoSub}>{copy.promoSub}</Text>
                     </View>
-                    <Ionicons name="chevron-forward" size={20} color="#fff" />
+                    <Ionicons
+                        name="chevron-forward"
+                        size={20}
+                        color="#fff"
+                    />
                 </Animated.View>
 
                 <Animated.View
@@ -109,33 +227,78 @@ export default function HomeStep({
                     <Pressable onPress={onPressSearch} style={s.search}>
                         <PinDot type="destination" size={26} />
                         <Text style={s.searchText}>Cari lokasi tujuan</Text>
-                        <Ionicons name="search" size={22} color={colors.textMuted} />
+                        <Ionicons
+                            name="search"
+                            size={22}
+                            color={colors.textMuted}
+                        />
                     </Pressable>
 
                     <View style={s.saved}>
-                        <MaterialCommunityIcons name="bookmark-plus" size={40} color={colors.primary} />
-                        <Text style={s.savedTitle}>Simpan alamat, pesan lebih cepat</Text>
-                        <Text style={s.savedSub}>Ada alamat yang sering dipakai? Simpan dulu, biar nggak repot ketik alamat lagi.</Text>
+                        <MaterialCommunityIcons
+                            name="bookmark-plus"
+                            size={40}
+                            color={colors.primary}
+                        />
+                        <Text style={s.savedTitle}>
+                            Simpan alamat, pesan lebih cepat
+                        </Text>
+                        <Text style={s.savedSub}>
+                            Ada alamat yang sering dipakai? Simpan dulu, biar
+                            nggak repot ketik alamat lagi.
+                        </Text>
                         <View style={s.pills}>
-                            <SavedChip kind="home" place={savedHome} onPress={() => onPressSaved('home')} onEdit={() => onEditSaved('home')} />
-                            <SavedChip kind="office" place={savedOffice} onPress={() => onPressSaved('office')} onEdit={() => onEditSaved('office')} />
+                            <SavedChip
+                                kind="home"
+                                place={savedHome}
+                                onPress={() => onPressSaved('home')}
+                                onEdit={() => onEditSaved('home')}
+                            />
+                            <SavedChip
+                                kind="office"
+                                place={savedOffice}
+                                onPress={() => onPressSaved('office')}
+                                onEdit={() => onEditSaved('office')}
+                            />
                         </View>
                     </View>
                 </Animated.View>
             </ScrollView>
 
-            {/* tombol back tetap di tempatnya saat halaman di-scroll */}
-            <View style={{ position: 'absolute', top: insets.top + 12, left: 16 }}>
+            {/* Tombol back tetap di tempatnya saat halaman di-scroll */}
+            <View
+                style={{
+                    position: 'absolute',
+                    top: insets.top + 12,
+                    left: 16,
+                }}
+            >
                 <CircleButton icon="arrow-back" onPress={onBack} />
             </View>
         </View>
     );
 }
 
+// ============================================================
+// STYLES
+// ============================================================
 const s = StyleSheet.create({
-    greetWrap: { paddingHorizontal: 24, },
-    greet: { color: '#fff', fontSize: 18, fontWeight: '800', textAlign: 'center', textShadowColor: '#0006', textShadowRadius: 4, },
-    greetSub: { color: '#fff', fontSize: 14, textAlign: 'center', textShadowColor: '#0006', textShadowRadius: 4 },
+    greetWrap: { paddingHorizontal: 24 },
+    greet: {
+        color: '#fff',
+        fontSize: 18,
+        fontWeight: '800',
+        textAlign: 'center',
+        textShadowColor: '#0006',
+        textShadowRadius: 4,
+    },
+    greetSub: {
+        color: '#fff',
+        fontSize: 14,
+        textAlign: 'center',
+        textShadowColor: '#0006',
+        textShadowRadius: 4,
+    },
     promo: {
         marginHorizontal: 16,
         backgroundColor: 'rgba(255,255,255,0.2)',
@@ -149,7 +312,14 @@ const s = StyleSheet.create({
         alignItems: 'center',
         gap: 12,
     },
-    promoIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+    promoIcon: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        backgroundColor: '#fff',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
     promoTitle: { color: '#fff', fontWeight: '800', fontSize: 15 },
     promoSub: { color: '#fff', fontSize: 13, marginTop: 1 },
     sheet: {
@@ -174,9 +344,24 @@ const s = StyleSheet.create({
     },
     searchText: { flex: 1, color: colors.textMuted, fontSize: 16 },
     saved: { alignItems: 'center', paddingTop: 8 },
-    savedTitle: { fontSize: 17, fontWeight: '800', color: colors.text, marginTop: 8 },
-    savedSub: { textAlign: 'center', color: colors.textMuted, marginTop: 4, lineHeight: 20 },
-    pills: { flexDirection: 'row', gap: 10, marginTop: 36, alignSelf: 'stretch' },
+    savedTitle: {
+        fontSize: 17,
+        fontWeight: '800',
+        color: colors.text,
+        marginTop: 8,
+    },
+    savedSub: {
+        textAlign: 'center',
+        color: colors.textMuted,
+        marginTop: 4,
+        lineHeight: 20,
+    },
+    pills: {
+        flexDirection: 'row',
+        gap: 10,
+        marginTop: 36,
+        alignSelf: 'stretch',
+    },
     pill: {
         flex: 1,
         minWidth: 0,
@@ -190,7 +375,12 @@ const s = StyleSheet.create({
         borderWidth: 1,
         borderColor: colors.border,
     },
-    pillText: { fontWeight: '700', color: colors.text, fontSize: 14, flexShrink: 1 },
+    pillText: {
+        fontWeight: '700',
+        color: colors.text,
+        fontSize: 14,
+        flexShrink: 1,
+    },
     promoIconImage: {
         width: 35,
         height: 35,

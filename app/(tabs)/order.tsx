@@ -1,7 +1,9 @@
 import AppAlert from '@/components/AppAlert';
 import LoadingModal from '@/components/LoadingModal';
 import { colors } from '@/constants/ojek-theme';
+import { useOrder } from '@/contexts/OrderContext';
 import { api, OrderResponse } from '@/lib/api';
+import { ACTIVE_STATUSES as LIVE_STATUSES, openOrder } from '@/lib/openOrder';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useMemo, useState } from 'react';
@@ -106,6 +108,7 @@ const shortAddress = (name?: string | null) => {
 export default function PesananScreen() {
     const insets = useSafeAreaInsets();
     const router = useRouter();
+    const { setActiveOrder } = useOrder();
 
     const [orders, setOrders] = useState<OrderResponse[]>([]);
     const [loading, setLoading] = useState(true);
@@ -189,6 +192,11 @@ export default function PesananScreen() {
     // Klik order -> halaman detail
     // ============================================================
     const handlePressOrder = (order: OrderResponse) => {
+        // Order berjalan -> layar live; riwayat -> rangkuman
+        if (LIVE_STATUSES.includes(order.status)) {
+            openOrder(order, setActiveOrder);
+            return;
+        }
         router.push({
             pathname: '/pesanan-detail',
             params: { order: JSON.stringify(order) },

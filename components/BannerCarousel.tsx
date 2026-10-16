@@ -1,3 +1,4 @@
+// components/BannerCarousel.tsx
 import { useEffect, useRef, useState } from 'react';
 import {
     Dimensions,
@@ -11,24 +12,41 @@ import {
 } from 'react-native';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const BANNER_WIDTH = SCREEN_WIDTH - 32; // margin horizontal 16 kiri-kanan
-const AUTO_SLIDE_INTERVAL = 3000; // 3 detik
+const BANNER_WIDTH = SCREEN_WIDTH - 32;
+const AUTO_SLIDE_INTERVAL = 3000;
+
+// ✅ Terima string URL ATAU require() lokal
+export type BannerSource = ImageSourcePropType | string;
 
 type Props = {
-    images: ImageSourcePropType[];
+    images: BannerSource[];
+    height?: number;
 };
 
-export default function BannerCarousel({ images }: Props) {
+/** Convert string URL ke { uri } */
+function toSource(item: BannerSource): ImageSourcePropType {
+    if (typeof item === 'string') {
+        return { uri: item };
+    }
+    return item;
+}
+
+export default function BannerCarousel({ images, height = 181 }: Props) {
     const [activeIndex, setActiveIndex] = useState(0);
     const flatListRef = useRef<FlatList>(null);
     const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const startAutoSlide = () => {
         if (intervalRef.current) clearInterval(intervalRef.current);
+        if (images.length <= 1) return; // jangan auto-slide kalau cuma 1
+
         intervalRef.current = setInterval(() => {
             setActiveIndex((prev) => {
                 const next = (prev + 1) % images.length;
-                flatListRef.current?.scrollToIndex({ index: next, animated: true });
+                flatListRef.current?.scrollToIndex({
+                    index: next,
+                    animated: true,
+                });
                 return next;
             });
         }, AUTO_SLIDE_INTERVAL);
@@ -39,21 +57,27 @@ export default function BannerCarousel({ images }: Props) {
         return () => {
             if (intervalRef.current) clearInterval(intervalRef.current);
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [images.length]);
 
-    const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-        const index = Math.round(e.nativeEvent.contentOffset.x / BANNER_WIDTH);
+    const handleScroll = (
+        e: NativeSyntheticEvent<NativeScrollEvent>
+    ) => {
+        const index = Math.round(
+            e.nativeEvent.contentOffset.x / BANNER_WIDTH
+        );
         setActiveIndex(index);
     };
 
     const handleScrollBeginDrag = () => {
-        // reset timer saat user swipe manual, biar gak tabrakan sama auto-slide
         if (intervalRef.current) clearInterval(intervalRef.current);
     };
 
     const handleScrollEndDrag = () => {
         startAutoSlide();
     };
+
+    if (!images || images.length === 0) return null;
 
     return (
         <View style={styles.container}>
@@ -74,20 +98,27 @@ export default function BannerCarousel({ images }: Props) {
                     index,
                 })}
                 renderItem={({ item }) => (
-                    <Image source={item} style={styles.bannerImage} />
+                    <Image
+                        source={toSource(item)}   // ✅ support string URL
+                        style={[styles.bannerImage, { height }]}
+                    />
                 )}
             />
-            <View style={styles.dotsContainer}>
-                {images.map((_, index) => (
-                    <View
-                        key={index}
-                        style={[
-                            styles.dot,
-                            index === activeIndex && styles.dotActive,
-                        ]}
-                    />
-                ))}
-            </View>
+
+            {/* Dot indicator — hanya kalau >1 banner */}
+            {images.length > 1 && (
+                <View style={styles.dotsContainer}>
+                    {images.map((_, index) => (
+                        <View
+                            key={index}
+                            style={[
+                                styles.dot,
+                                index === activeIndex && styles.dotActive,
+                            ]}
+                        />
+                    ))}
+                </View>
+            )}
         </View>
     );
 }
@@ -102,6 +133,7 @@ const styles = StyleSheet.create({
         height: 181,
         borderRadius: 24,
         resizeMode: 'cover',
+        backgroundColor: '#EEF3F7',
     },
     dotsContainer: {
         flexDirection: 'row',

@@ -1,3 +1,4 @@
+import { mapStyle } from '@/constants/ojek-map-style';
 import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
 import { getRoute } from '@/services/google-maps';
@@ -40,8 +41,7 @@ const VEHICLE_IMG = {
 };
 const MARKER_DEST = require('@/assets/images/marker-destination.png');
 
-// Sedikit lebih pendek dari POLL_INTERVAL (3000 ms) di OjekFlow,
-// supaya marker selalu sudah sampai sebelum titik berikutnya datang.
+// Sedikit lebih pendek dari POLL_INTERVAL (3000 ms) di OjekFlow
 const MARKER_ANIM_MS = 2800;
 // Driver dianggap keluar jalur jika > 150 m dari polyline
 const OFF_ROUTE_METERS = 150;
@@ -49,6 +49,15 @@ const OFF_ROUTE_METERS = 150;
 const REROUTE_MIN_INTERVAL_MS = 15000;
 // Dianggap sampai tujuan jika sisa jarak <= 30 m
 const ARRIVE_METERS = 30;
+// Jarak minimum (meter) supaya arah ikon diperbarui (hindari jitter GPS)
+const HEADING_MIN_METERS = 5;
+// Offset rotasi ikon: 0 jika gambar menghadap ke atas (utara).
+// Ubah (90, 180, -90) jika gambar menghadap arah lain.
+const ICON_HEADING_OFFSET = 0;
+// Kamera mengikuti driver
+const FOLLOW_ZOOM = 16;
+// Tampilkan gambaran rute dulu, baru kamera mulai mengikuti
+const FOLLOW_START_DELAY_MS = 2500;
 
 const R = 6371000;
 const toRad = (d: number) => (d * Math.PI) / 180;
@@ -86,6 +95,18 @@ function nearestIndex(polyline: LatLng[], pos: LatLng): number {
     return best;
 }
 
+/** Arah (derajat 0-360, 0 = utara) dari titik a ke titik b */
+function bearing(a: LatLng, b: LatLng): number {
+    const y =
+        Math.sin(toRad(b.longitude - a.longitude)) * Math.cos(toRad(b.latitude));
+    const x =
+        Math.cos(toRad(a.latitude)) * Math.sin(toRad(b.latitude)) -
+        Math.sin(toRad(a.latitude)) *
+        Math.cos(toRad(b.latitude)) *
+        Math.cos(toRad(b.longitude - a.longitude));
+    return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
 /** Animasikan marker dengan aman (bypass typing react-native-maps) */
 function animateMarker(region: AnimatedRegion, to: LatLng, duration: number) {
     const config: any = {
@@ -98,6 +119,13 @@ function animateMarker(region: AnimatedRegion, to: LatLng, duration: number) {
     };
     region.timing(config).start();
 }
+
+const PAYMENT_LABEL: Record<string, string> = {
+    cash: 'Tunai',
+    wallet: 'Saldo',
+    qris: 'QRIS',
+    bank_transfer: 'Transfer Bank',
+};
 
 export default function OnTripStep({
     payload,
@@ -120,6 +148,12 @@ export default function OnTripStep({
     const mountedRef = useRef(true);
     const reqRef = useRef(0);
     const lastRerouteRef = useRef(0);
+    // Jarak total awal, dipakai tetap agar progress tidak reset saat rute ulang
+    const baseTotalRef = useRef(0);
+
+    // ---- Kamera mengikuti driver ----
+    const [following, setFollowing] = useState(true);
+    const [followReady, setFollowReady] = useState(false);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -133,7 +167,12 @@ export default function OnTripStep({
         const id = ++reqRef.current;
         getRoute(from, payload.destination.coords)
             .then((r) => {
-                if (mountedRef.current && id === reqRef.current) setRoute(r);
+                if (mountedRef.current && id === reqRef.current) {
+                    if (!baseTotalRef.current && r?.distanceMeters) {
+                        baseTotalRef.current = r.distanceMeters;
+                    }
+                    setRoute(r);
+                }
             })
             .catch((err) =>
                 console.warn('[OnTrip] Gagal ambil rute:', err?.message)
@@ -159,7 +198,7 @@ export default function OnTripStep({
     );
     const last = polyline.length - 1;
 
-    // ---- Posisi driver pada polyline (REALTIME, bukan simulasi) ----
+    // ---- Posisi driver pada polyline (REALTIME) ----
     const idx = useMemo(
         () => nearestIndex(polyline, driverPos),
         [polyline, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
@@ -194,11 +233,15 @@ export default function OnTripStep({
         animateMarker(driverCoord, driverPos, MARKER_ANIM_MS);
     }, [driverPos.latitude, driverPos.longitude, driverCoord]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ---- Matikan trackView setelah 500 ms ----
+    // ---- Arah ikon: dihitung dari pergerakan terakhir ----
+    const [heading, setHeading] = useState(0);
+    const prevPosRef = useRef<LatLng>(driver.coords);
     useEffect(() => {
-        const t = setTimeout(() => setTrackView(false), 500);
-        return () => clearTimeout(t);
-    }, []);
+        if (haversine(prevPosRef.current, driverPos) > HEADING_MIN_METERS) {
+            setHeading(bearing(prevPosRef.current, driverPos));
+            prevPosRef.current = driverPos;
+        }
+    }, [driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ---- Fit peta: sekali saat rute pertama tiba ----
     const fit = () => {
@@ -216,8 +259,20 @@ export default function OnTripStep({
         if (route && !fittedRef.current) {
             fittedRef.current = true;
             fit();
+            // setelah gambaran rute terlihat, kamera boleh mulai mengikuti
+            const t = setTimeout(() => setFollowReady(true), FOLLOW_START_DELAY_MS);
+            return () => clearTimeout(t);
         }
     }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // ---- Kamera mengikuti driver ----
+    useEffect(() => {
+        if (!following || !followReady) return;
+        mapRef.current?.animateCamera(
+            { center: driverPos, zoom: FOLLOW_ZOOM },
+            { duration: MARKER_ANIM_MS }
+        );
+    }, [following, followReady, driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ---------- Sisa jarak, progress, ETA (dari posisi driver) ----------
     const remainingMeters = useMemo(() => {
@@ -226,7 +281,9 @@ export default function OnTripStep({
     }, [polyline, idx, last, driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const totalMeters = Math.max(
-        route?.distanceMeters ?? remainingDistance(polyline, 0),
+        baseTotalRef.current ||
+        route?.distanceMeters ||
+        remainingDistance(polyline, 0),
         remainingMeters,
         1
     );
@@ -236,7 +293,10 @@ export default function OnTripStep({
     const totalDistKm = (totalMeters / 1000).toFixed(1);
 
     const baseSec = route?.durationSec ?? payload.durationSec ?? 0;
-    const remainSec = Math.round(baseSec * (remainingMeters / totalMeters));
+    const routeMeters = route?.distanceMeters ?? totalMeters;
+    const remainSec = Math.round(
+        baseSec * Math.min(1, remainingMeters / Math.max(routeMeters, 1))
+    );
     const minutes = Math.max(1, Math.ceil(remainSec / 60));
 
     const arrived = remainingMeters <= ARRIVE_METERS;
@@ -246,7 +306,9 @@ export default function OnTripStep({
     const vehicleIcon =
         VEHICLE_IMG[driver.vehicleType ?? payload.service] ?? VEHICLE_IMG.motor;
 
-    // Jalur yang sudah dilewati & yang belum (berpusat di posisi driver)
+    const payLabel = PAYMENT_LABEL[payload.payment_method ?? 'cash'] ?? 'Tunai';
+
+    // Jalur yang sudah dilewati & yang belum
     const passed = useMemo(
         () => [...polyline.slice(0, idx + 1), driverPos],
         [polyline, idx, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
@@ -261,10 +323,13 @@ export default function OnTripStep({
             <MapView
                 ref={mapRef}
                 style={StyleSheet.absoluteFill}
+                customMapStyle={mapStyle}
                 provider={MAP_PROVIDER}
                 toolbarEnabled={false}
                 rotateEnabled={false}
                 onMapReady={fit}
+                // geser manual oleh user → berhenti mengikuti
+                onPanDrag={() => setFollowing(false)}
                 initialRegion={{
                     latitude: driver.coords.latitude,
                     longitude: driver.coords.longitude,
@@ -283,7 +348,7 @@ export default function OnTripStep({
                     />
                 )}
 
-                {/* Jalur yang belum dilewati (putih + biru) */}
+                {/* Jalur yang belum dilewati (putih + warna utama) */}
                 {ahead.length > 1 && (
                     <>
                         <Polyline
@@ -313,10 +378,12 @@ export default function OnTripStep({
                     zIndex={1}
                 />
 
-                {/* Marker driver — mengikuti driver.coords (realtime) */}
+                {/* Marker driver: realtime dari driver.coords, berputar sesuai arah */}
                 <MarkerAnimated
                     coordinate={driverCoord}
                     anchor={{ x: 0.5, y: 0.5 }}
+                    flat
+                    rotation={(heading + ICON_HEADING_OFFSET) % 360}
                     tracksViewChanges={trackView}
                     zIndex={2}
                 >
@@ -325,6 +392,8 @@ export default function OnTripStep({
                             source={vehicleIcon}
                             style={{ width: 34, height: 34 }}
                             resizeMode="contain"
+                            // matikan tracksViewChanges hanya setelah gambar siap
+                            onLoad={() => setTimeout(() => setTrackView(false), 150)}
                         />
                     </View>
                 </MarkerAnimated>
@@ -350,6 +419,22 @@ export default function OnTripStep({
             <View style={[s.floatBack, { bottom: SHEET_H + 12 }]}>
                 <CircleButton icon="arrow-back" onPress={onBack} />
             </View>
+
+            {/* Tombol pusatkan ke driver, muncul saat peta digeser manual */}
+            {!following && (
+                <View style={[s.floatRecenter, { bottom: SHEET_H + 12 }]}>
+                    <CircleButton
+                        icon="locate"
+                        onPress={() => {
+                            setFollowing(true);
+                            mapRef.current?.animateCamera(
+                                { center: driverPos, zoom: FOLLOW_ZOOM },
+                                { duration: 600 }
+                            );
+                        }}
+                    />
+                </View>
+            )}
 
             <Animated.View
                 entering={FadeInUp.duration(350)}
@@ -415,7 +500,7 @@ export default function OnTripStep({
                             <Text style={s.fareLabel}>{payload.optionName}</Text>
                             <View style={s.payRow}>
                                 <Ionicons name="wallet" size={13} color={colors.primary} />
-                                <Text style={s.payText}>Tunai</Text>
+                                <Text style={s.payText}>{payLabel}</Text>
                             </View>
                         </View>
                         <Text style={s.farePrice}>{formatRupiah(payload.price)}</Text>
@@ -462,6 +547,7 @@ const s = StyleSheet.create({
     destDotInner: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#fff' },
 
     floatBack: { position: 'absolute', left: 16 },
+    floatRecenter: { position: 'absolute', right: 16 },
 
     sheet: {
         position: 'absolute',

@@ -1,3 +1,4 @@
+import { mapStyle } from '@/constants/ojek-map-style';
 import { colors, MAP_DELTA } from '@/constants/ojek-theme';
 import { reverseGeocode } from '@/services/google-maps';
 import type { Coords, PlaceLoc } from '@/types/gosend';
@@ -108,6 +109,7 @@ export default function PickOnMapStep({
                 <MapView
                     ref={mapRef}
                     style={StyleSheet.absoluteFill}
+                    customMapStyle={mapStyle}
                     provider={MAP_PROVIDER}
                     // ⬇️ Mulai dengan zoom-out (5x lebih jauh dari MAP_DELTA)
                     initialRegion={{

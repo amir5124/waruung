@@ -1,3 +1,4 @@
+// components/ServiceMenuItem.tsx
 import { router } from 'expo-router';
 import {
     Image,
@@ -8,22 +9,35 @@ import {
     View,
 } from 'react-native';
 
+// ✅ Terima string URL ATAU require() lokal
+export type ServiceIconSource = ImageSourcePropType | string;
+
 type Props = {
     label: string;
-    icon: ImageSourcePropType;
+    icon: ServiceIconSource;
     route?: string;
     onPress?: () => void;
 };
 
-export default function ServiceMenuItem({ label, icon, route, onPress }: Props) {
+/** Convert string URL ke { uri } */
+function toSource(item: ServiceIconSource): ImageSourcePropType {
+    if (typeof item === 'string') {
+        return { uri: item };
+    }
+    return item;
+}
+
+export default function ServiceMenuItem({
+    label,
+    icon,
+    route,
+    onPress,
+}: Props) {
     const handlePress = () => {
-        // Prioritas: kalau parent kirim onPress, pakai itu.
         if (onPress) {
             onPress();
             return;
         }
-
-        // Fallback: navigasi pakai route kalau ada.
         if (route) {
             router.push(route as any);
         }
@@ -36,7 +50,10 @@ export default function ServiceMenuItem({ label, icon, route, onPress }: Props) 
             android_ripple={{ color: '#E5EEFB' }}
         >
             <View style={styles.iconWrap}>
-                <Image source={icon} style={styles.icon} />
+                <Image
+                    source={toSource(icon)}   // ✅ support string URL
+                    style={styles.icon}
+                />
             </View>
             <Text style={styles.label}>{label}</Text>
         </Pressable>

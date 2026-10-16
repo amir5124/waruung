@@ -1,25 +1,29 @@
 // components/order/OrderStep.tsx
+import { mapStyle } from '@/constants/ojek-map-style';
 import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
+import { useDriverEta } from '@/hooks/use-driver-eta';
+import { pickMarkerIcon, useMapMarkers } from '@/hooks/use-map-markers';
 import { useTariffs } from '@/hooks/use-tariffs';
 import { api, Tariff } from '@/lib/api';
 import { trackQuote } from '@/lib/behaviorTracker';
 import { getRoute } from '@/services/google-maps';
 import type { OrderPayload, PlaceLoc, RouteInfo, ServiceType } from '@/types/ojek';
 import { AntDesign, Ionicons } from '@expo/vector-icons';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
     Image,
     Modal,
     Pressable,
+    Animated as RNAnimated,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
     useWindowDimensions,
-    View
+    View,
 } from 'react-native';
 import {
     Gesture,
@@ -37,6 +41,8 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CircleButton, MAP_PROVIDER } from './parts';
 
+import LoadingModal from '@/components/LoadingModal';
+
 // ============================================================
 // TYPES
 // ============================================================
@@ -45,7 +51,7 @@ type Props = {
     origin: PlaceLoc;
     destination: PlaceLoc;
     onBack: () => void;
-    onOrder: (p: OrderPayload) => void;
+    onOrder: (p: OrderPayload) => void | Promise<void>;
     onEdit: () => void;
     paymentLabel?: string;
     voucherText?: string;
@@ -56,6 +62,13 @@ type Props = {
 };
 
 type PaymentMethod = 'cash' | 'wallet' | 'qris' | 'bank_transfer';
+
+type DriverPoint = {
+    id: string;
+    latitude: number;
+    longitude: number;
+    heading: number;
+};
 
 // ============================================================
 // CONSTANTS
@@ -75,6 +88,18 @@ const CYAN = '#12a8d8';
 const CORAL = '#ee6c6c';
 const PURPLE = '#8B5CF6';
 const GREEN = '#16A34A';
+
+const DRIVER_ICON_SIZE = 40;
+const MAX_DRIVER_MARKERS = 30;
+
+// ---- Pengaturan zoom to fit ----
+// FIT_ZOOM_OUT  : 1 = rute pas memenuhi area terlihat; makin besar makin jauh (coba 1.3 – 2.5)
+// FIT_MIN_DELTA : batas zoom terdekat (derajat). Rute sangat pendek tidak akan lebih dekat dari ini.
+//                 0.012 ≈ 1,3 km tinggi layar. Naikkan kalau masih terlalu dekat.
+// FIT_SIDE_PAD  : jarak kiri/kanan (px) antara rute dan tepi layar
+const FIT_ZOOM_OUT = 1.5;
+const FIT_MIN_DELTA = 0.012;
+const FIT_SIDE_PAD = 50;
 
 const BANKS = [
     { code: 'BRI', label: 'BRI', short: 'BRI', color: '#00529C' },
@@ -99,12 +124,34 @@ function isValidCoords(c: any): boolean {
     );
 }
 
+/**
+ * Normalisasi data driver dari hook (toleran terhadap beberapa bentuk field):
+ * { id, coords: { latitude, longitude } } | { latitude, longitude } | { lat, lng } | { lat, lon }
+ */
+function toDriverPoint(d: any, i: number): DriverPoint | null {
+    if (!d) return null;
+    const lat = Number(
+        d.coords?.latitude ?? d.coords?.lat ?? d.latitude ?? d.lat
+    );
+    const lng = Number(
+        d.coords?.longitude ?? d.coords?.lng ?? d.longitude ?? d.lng ?? d.lon
+    );
+    if (!isValidCoords({ latitude: lat, longitude: lng })) return null;
+    const heading = Number(d.heading ?? d.bearing ?? d.rotation ?? 0);
+    return {
+        id: String(d.id ?? d.driver_id ?? d.driverId ?? `drv-${i}`),
+        latitude: lat,
+        longitude: lng,
+        heading: Number.isFinite(heading) ? heading : 0,
+    };
+}
+
 function getPaymentLabel(method: PaymentMethod, bankLabel?: string): string {
     switch (method) {
         case 'cash':
             return 'Tunai';
         case 'wallet':
-            return 'Saldo Waruung';
+            return 'Saldo LinkU';
         case 'qris':
             return 'QRIS';
         case 'bank_transfer':
@@ -156,6 +203,56 @@ function RouteDot({ type }: { type: 'origin' | 'destination' }) {
     );
 }
 
+// ============================================================
+// DRIVER MARKER — icon dari DB (motor_map / mobil_map)
+// ============================================================
+const DriverMarker = React.memo(function DriverMarker({
+    driver,
+    iconUri,
+    fallback,
+}: {
+    driver: DriverPoint;
+    iconUri?: string;
+    fallback: any;
+}) {
+    // tracksViewChanges true dulu supaya gambar remote sempat ter-render,
+    // lalu dimatikan agar hemat performa.
+    const [tracks, setTracks] = useState(true);
+    const [failed, setFailed] = useState(false);
+
+    useEffect(() => {
+        setTracks(true);
+        setFailed(false);
+        const t = setTimeout(() => setTracks(false), 1500); // jaga-jaga onLoadEnd tidak terpanggil
+        return () => clearTimeout(t);
+    }, [iconUri]);
+
+    const source = iconUri && !failed ? { uri: iconUri } : fallback;
+
+    return (
+        <Marker
+            coordinate={{
+                latitude: driver.latitude,
+                longitude: driver.longitude,
+            }}
+            anchor={{ x: 0.5, y: 0.5 }}
+            flat
+            rotation={driver.heading}
+            tracksViewChanges={tracks}
+            zIndex={4}
+            tappable={false}
+        >
+            <Image
+                source={source}
+                style={{ width: DRIVER_ICON_SIZE, height: DRIVER_ICON_SIZE }}
+                resizeMode="contain"
+                onLoadEnd={() => setTracks(false)}
+                onError={() => setFailed(true)}
+            />
+        </Marker>
+    );
+});
+
 function PaymentOption({
     icon,
     color,
@@ -201,10 +298,96 @@ function PaymentOption({
     );
 }
 
+// ============================================================
+// SKELETON SHIMMER
+// ============================================================
+function SkeletonBox({
+    width,
+    height,
+    borderRadius = 6,
+    style,
+}: {
+    width: number | string;
+    height: number;
+    borderRadius?: number;
+    style?: any;
+}) {
+    const shimmer = useRef(new RNAnimated.Value(0)).current;
+
+    useEffect(() => {
+        const loop = RNAnimated.loop(
+            RNAnimated.sequence([
+                RNAnimated.timing(shimmer, {
+                    toValue: 1,
+                    duration: 900,
+                    useNativeDriver: true,
+                }),
+                RNAnimated.timing(shimmer, {
+                    toValue: 0,
+                    duration: 900,
+                    useNativeDriver: true,
+                }),
+            ])
+        );
+        loop.start();
+        return () => loop.stop();
+    }, [shimmer]);
+
+    const opacity = shimmer.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0.4, 0.9],
+    });
+
+    return (
+        <RNAnimated.View
+            style={[
+                {
+                    width,
+                    height,
+                    borderRadius,
+                    backgroundColor: '#E5E7EB',
+                    opacity,
+                },
+                style,
+            ]}
+        />
+    );
+}
+
+function TariffSkeleton() {
+    return (
+        <View style={s.option}>
+            <View style={s.optionIcon}>
+                <SkeletonBox width={52} height={52} borderRadius={12} />
+            </View>
+            <View style={{ flex: 1, gap: 8 }}>
+                <SkeletonBox width={110} height={16} />
+                <SkeletonBox width={150} height={12} />
+                <SkeletonBox width={90} height={12} />
+            </View>
+            <SkeletonBox width={70} height={18} />
+        </View>
+    );
+}
+
+function TariffSkeletonList({ count = 3 }: { count?: number }) {
+    return (
+        <View>
+            {Array.from({ length: count }).map((_, i) => (
+                <TariffSkeleton key={i} />
+            ))}
+        </View>
+    );
+}
+
+// ============================================================
+// OPTION ROW — dengan ETA real
+// ============================================================
 function OptionRow({
     option,
     service,
     price,
+    etaMin,
     selected,
     loading,
     onPress,
@@ -212,10 +395,16 @@ function OptionRow({
     option: Tariff;
     service: ServiceType;
     price: number;
+    etaMin: number | null;
     selected: boolean;
     loading: boolean;
     onPress: () => void;
 }) {
+    const etaLabel =
+        etaMin != null
+            ? `${etaMin} mnt`
+            : `± ${option.eta_min} mnt`;
+
     return (
         <Pressable
             onPress={onPress}
@@ -238,7 +427,7 @@ function OptionRow({
                     </Text>
                 </View>
                 <View style={s.meta}>
-                    <Text style={s.eta}>{option.eta_min} mnt</Text>
+                    <Text style={s.eta}>{etaLabel}</Text>
                     <View style={s.dot} />
                     <Ionicons
                         name="person"
@@ -262,6 +451,7 @@ function OptionRow({
         </Pressable>
     );
 }
+
 // ============================================================
 // MAIN COMPONENT
 // ============================================================
@@ -280,7 +470,7 @@ export default function OrderStep({
     onBusinessPress,
 }: Props) {
     const insets = useSafeAreaInsets();
-    const { height } = useWindowDimensions();
+    const { height, width } = useWindowDimensions();
     const EXPANDED = Math.min(height * 0.6, 540);
     const COLLAPSED = Math.min(EXPANDED - 80, 340 + insets.bottom);
     const MID = (EXPANDED + COLLAPSED) / 2;
@@ -290,9 +480,49 @@ export default function OrderStep({
     const [route, setRoute] = useState<RouteInfo | null>(null);
     const [routeError, setRouteError] = useState(false);
     const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [mapReady, setMapReady] = useState(false);
 
     // ============================================================
-    // ✅ PAYMENT STATE
+    // ETA REAL + DRIVER ONLINE
+    // ============================================================
+    const driverEta = useDriverEta(origin?.coords ?? null, {
+        radius: 5000,
+        limit: 30,
+        pollMs: 15000,
+        service: service,
+    });
+
+    // ============================================================
+    // ICON MARKER DARI DATABASE (motor_map / mobil_map)
+    // ============================================================
+    const { icons: markerIcons } = useMapMarkers();
+    const driverMarkerKey = `${service}_map`; // 'motor_map' | 'mobil_map'
+    const driverIconUri = pickMarkerIcon(markerIcons, driverMarkerKey);
+
+    const driverPoints = useMemo<DriverPoint[]>(() => {
+        const raw: any[] = (driverEta as any)?.drivers ?? [];
+        return raw
+            .map(toDriverPoint)
+            .filter((d): d is DriverPoint => d !== null)
+            .slice(0, MAX_DRIVER_MARKERS);
+    }, [driverEta]);
+
+    // DEBUG — hapus kalau marker driver sudah muncul
+    useEffect(() => {
+        console.log(
+            '[OrderStep] drivers raw:',
+            (driverEta as any)?.drivers?.length,
+            '| points:',
+            driverPoints.length,
+            '| iconKey:',
+            driverMarkerKey,
+            '| iconUri:',
+            driverIconUri ? 'ada' : 'kosong (pakai fallback lokal)'
+        );
+    }, [driverEta, driverPoints.length, driverMarkerKey, driverIconUri]);
+
+    // ============================================================
+    // PAYMENT STATE
     // ============================================================
     const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
     const [bankCode, setBankCode] = useState<string | null>(null);
@@ -301,18 +531,62 @@ export default function OrderStep({
     const [showBankModal, setShowBankModal] = useState(false);
     const [customerBalance, setCustomerBalance] = useState<number>(0);
 
-    // ---- Tarif dari backend ----
-    const { tariffs, loading: tariffsLoading, calcPrice } = useTariffs(service);
+    // ============================================================
+    // SUBMIT STATE
+    // ============================================================
+    const [submitting, setSubmitting] = useState(false);
+    const submittingRef = useRef(false);
+    const mountedRef = useRef(true);
+
+    // ============================================================
+    // SKELETON STATE
+    // ============================================================
+    const [switchingTab, setSwitchingTab] = useState(false);
 
     useEffect(() => {
-        if (!selectedId && tariffs.length > 0) {
-            setSelectedId(tariffs[0].code);
-        }
-    }, [tariffs, selectedId]);
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+        };
+    }, []);
 
     // ============================================================
-    // ✅ FETCH SALDO CUSTOMER
+    // SYNC serviceType dari parent
     // ============================================================
+    useEffect(() => {
+        setService(serviceType);
+    }, [serviceType]);
+
+    // ============================================================
+    // TARIF dari backend
+    // ============================================================
+    const { tariffs, loading: tariffsLoading, calcPrice } = useTariffs(service);
+
+    const filteredTariffs = useMemo(() => {
+        return tariffs.filter((t) => t.service_type === service);
+    }, [tariffs, service]);
+
+    const showSkeleton = tariffsLoading || switchingTab;
+
+    useEffect(() => {
+        setSelectedId(null);
+    }, [service]);
+
+    useEffect(() => {
+        setSwitchingTab(true);
+        const t = setTimeout(() => setSwitchingTab(false), 400);
+        return () => clearTimeout(t);
+    }, [service]);
+
+    useEffect(() => {
+        if (!filteredTariffs.length) return;
+        const stillValid = filteredTariffs.some((t) => t.code === selectedId);
+        if (!stillValid) {
+            setSelectedId(filteredTariffs[0].code);
+        }
+    }, [filteredTariffs, selectedId]);
+
+    // FETCH SALDO CUSTOMER
     useEffect(() => {
         (async () => {
             try {
@@ -413,30 +687,103 @@ export default function OrderStep({
         };
     }, [origin.coords, destination.coords, coordsValid]);
 
-    const fit = () => {
-        const pts = route?.polyline?.length
-            ? route.polyline
-            : [origin.coords, destination.coords].filter(isValidCoords);
-        if (pts.length < 1) return;
-        mapRef.current?.fitToCoordinates(pts as any, {
-            edgePadding: {
-                top: insets.top + 130,
-                bottom: EXPANDED + 70,
-                left: 60,
-                right: 60,
-            },
-            animated: true,
-        });
-    };
-    useEffect(() => {
-        if (route) fit();
-    }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
+    // ============================================================
+    // ZOOM TO FIT
+    //  - Menghitung area peta yang benar-benar terlihat
+    //    (di antara kartu asal-tujuan di atas dan bottom sheet di bawah)
+    //  - Rute diletakkan di tengah area terlihat tersebut
+    //  - Marker driver sengaja TIDAK ikut di-fit
+    // ============================================================
+    const fit = useCallback(() => {
+        const map = mapRef.current;
+        if (!map) return;
 
-    // ---- Pilihan ----
+        const pts = [
+            origin?.coords,
+            destination?.coords,
+            ...(route?.polyline ?? []),
+        ].filter(isValidCoords) as { latitude: number; longitude: number }[];
+
+        if (pts.length === 0) return;
+
+        // Hanya 1 titik valid → zoom ke titik itu
+        if (pts.length === 1) {
+            map.animateToRegion(
+                {
+                    latitude: pts[0].latitude,
+                    longitude: pts[0].longitude,
+                    latitudeDelta: FIT_MIN_DELTA,
+                    longitudeDelta: FIT_MIN_DELTA,
+                },
+                400
+            );
+            return;
+        }
+
+        // Batas area rute
+        const lats = pts.map((p) => p.latitude);
+        const lngs = pts.map((p) => p.longitude);
+        const minLat = Math.min(...lats);
+        const maxLat = Math.max(...lats);
+        const minLng = Math.min(...lngs);
+        const maxLng = Math.max(...lngs);
+        const routeCenterLat = (minLat + maxLat) / 2;
+        const routeCenterLng = (minLng + maxLng) / 2;
+
+        // Area peta yang terlihat (px)
+        const topInset = insets.top + 130; // kartu asal-tujuan
+        const bottomInset = EXPANDED + 20; // bottom sheet
+        const visibleH = Math.max(height - topInset - bottomInset, 200);
+        const visibleW = Math.max(width - FIT_SIDE_PAD * 2, 150);
+
+        // Delta total peta (seluruh layar) supaya rute muat di area terlihat
+        const latDelta = Math.max(
+            (maxLat - minLat) * FIT_ZOOM_OUT * (height / visibleH),
+            FIT_MIN_DELTA
+        );
+        const lngDelta = Math.max(
+            (maxLng - minLng) * FIT_ZOOM_OUT * (width / visibleW),
+            FIT_MIN_DELTA * (width / height)
+        );
+
+        // Geser pusat peta agar rute berada di tengah area terlihat
+        const offsetPx = height / 2 - (topInset + visibleH / 2);
+        const centerLat = routeCenterLat - (offsetPx / height) * latDelta;
+
+        map.animateToRegion(
+            {
+                latitude: centerLat,
+                longitude: routeCenterLng,
+                latitudeDelta: latDelta,
+                longitudeDelta: lngDelta,
+            },
+            400
+        );
+    }, [
+        origin?.coords,
+        destination?.coords,
+        route?.polyline,
+        insets.top,
+        EXPANDED,
+        height,
+        width,
+    ]);
+
+    // Fit setelah map siap & rute tersedia (delay kecil agar layout map selesai,
+    // terutama di Android)
+    useEffect(() => {
+        if (!mapReady || !route) return;
+        const t = setTimeout(fit, 250);
+        return () => clearTimeout(t);
+    }, [mapReady, route, fit]);
+
     const selected = useMemo(() => {
-        if (!tariffs.length) return null;
-        return tariffs.find((o) => o.code === selectedId) ?? tariffs[0];
-    }, [tariffs, selectedId]);
+        if (!filteredTariffs.length) return null;
+        return (
+            filteredTariffs.find((o) => o.code === selectedId) ??
+            filteredTariffs[0]
+        );
+    }, [filteredTariffs, selectedId]);
 
     const priceOf = (t: Tariff) =>
         calcPrice(t.code, route?.distanceMeters ?? 0);
@@ -468,7 +815,7 @@ export default function OrderStep({
             },
             optionName: selected.label,
             price: currentPrice,
-            etaMin: selected.eta_min,
+            etaMin: driverEta.etaMin ?? selected.eta_min,
             distanceKm: route.distanceMeters / 1000,
         });
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -478,6 +825,7 @@ export default function OrderStep({
         route?.distanceMeters,
         origin?.name,
         destination?.name,
+        driverEta.etaMin,
     ]);
 
     const isSaldoEnough = customerBalance >= currentPrice;
@@ -498,8 +846,10 @@ export default function OrderStep({
     };
 
     const switchService = (t: ServiceType) => {
+        if (t === service) return;
         setService(t);
         setSelectedId(null);
+        setSwitchingTab(true);
         moveIndicator(t);
     };
 
@@ -518,10 +868,10 @@ export default function OrderStep({
     // ============================================================
     // HANDLE ORDER
     // ============================================================
-    const handleOrder = () => {
+    const handleOrder = async () => {
+        if (submittingRef.current) return;
         if (!route || !selected) return;
 
-        // Validasi tambahan
         if (paymentMethod === 'wallet' && !isSaldoEnough) {
             Alert.alert(
                 'Saldo tidak cukup',
@@ -540,21 +890,29 @@ export default function OrderStep({
             return;
         }
 
-        onOrder({
-            service,
-            optionId: selected.code,
-            optionName: selected.label,
-            price: priceOf(selected),
-            origin,
-            destination,
-            distanceMeters: route.distanceMeters,
-            durationSec: route.durationSec,
-            payment_method: paymentMethod, // ✅ KIRIM
-            bank_code:
-                paymentMethod === 'bank_transfer' && bankCode
-                    ? bankCode
-                    : undefined, // ✅ KIRIM
-        });
+        submittingRef.current = true;
+        setSubmitting(true);
+
+        try {
+            await onOrder({
+                service,
+                optionId: selected.code,
+                optionName: selected.label,
+                price: priceOf(selected),
+                origin,
+                destination,
+                distanceMeters: route.distanceMeters,
+                durationSec: route.durationSec,
+                payment_method: paymentMethod,
+                bank_code:
+                    paymentMethod === 'bank_transfer' && bankCode
+                        ? bankCode
+                        : undefined,
+            });
+        } finally {
+            submittingRef.current = false;
+            if (mountedRef.current) setSubmitting(false);
+        }
     };
 
     // ============================================================
@@ -565,10 +923,14 @@ export default function OrderStep({
             <MapView
                 ref={mapRef}
                 style={StyleSheet.absoluteFill}
+                customMapStyle={mapStyle}
                 provider={MAP_PROVIDER}
                 toolbarEnabled={false}
                 rotateEnabled={false}
-                onMapReady={fit}
+                showsPointsOfInterest={false}
+                showsBuildings={false}
+                showsTraffic={false}
+                onMapReady={() => setMapReady(true)}
                 initialRegion={{
                     ...(isValidCoords(origin?.coords)
                         ? origin.coords
@@ -595,6 +957,17 @@ export default function OrderStep({
                         />
                     </>
                 )}
+
+                {/* Driver online — icon sesuai layanan (motor_map / mobil_map) */}
+                {driverPoints.map((d) => (
+                    <DriverMarker
+                        key={`${service}-${d.id}`}
+                        driver={d}
+                        iconUri={driverIconUri}
+                        fallback={VEHICLE_IMG[service]}
+                    />
+                ))}
+
                 {isValidCoords(origin?.coords) && (
                     <Marker
                         coordinate={origin.coords}
@@ -602,7 +975,7 @@ export default function OrderStep({
                         anchor={{ x: 0.5, y: 1 }}
                         title={origin.name}
                         description="Titik jemput"
-                        zIndex={2}
+                        zIndex={3}
                     />
                 )}
                 {isValidCoords(destination?.coords) && (
@@ -612,7 +985,7 @@ export default function OrderStep({
                         anchor={{ x: 0.5, y: 1 }}
                         title={destination.name}
                         description="Tujuan"
-                        zIndex={2}
+                        zIndex={3}
                     />
                 )}
             </MapView>
@@ -701,41 +1074,30 @@ export default function OrderStep({
                     style={{ flex: 1 }}
                     showsVerticalScrollIndicator={false}
                 >
-                    {tariffsLoading && (
-                        <View
-                            style={{
-                                padding: 20,
-                                alignItems: 'center',
-                            }}
-                        >
-                            <ActivityIndicator color={colors.primary} />
-                        </View>
+                    {showSkeleton && <TariffSkeletonList count={3} />}
+
+                    {!showSkeleton && filteredTariffs.length === 0 && (
+                        <TariffSkeletonList count={2} />
                     )}
 
-                    {!tariffsLoading && tariffs.length === 0 && (
-                        <View
-                            style={{
-                                padding: 20,
-                                alignItems: 'center',
-                            }}
-                        >
-                            <Text style={{ color: colors.textMuted }}>
-                                Tarif belum tersedia untuk layanan ini.
-                            </Text>
-                        </View>
-                    )}
-
-                    {!tariffsLoading &&
-                        tariffs.map((o) => (
-                            <OptionRow
+                    {!showSkeleton &&
+                        filteredTariffs.map((o, idx) => (
+                            <Animated.View
                                 key={o.code}
-                                option={o}
-                                service={service}
-                                price={priceOf(o)}
-                                loading={!route}
-                                selected={selected?.code === o.code}
-                                onPress={() => setSelectedId(o.code)}
-                            />
+                                entering={FadeInUp.delay(
+                                    idx * 40
+                                ).duration(220)}
+                            >
+                                <OptionRow
+                                    option={o}
+                                    service={service}
+                                    price={priceOf(o)}
+                                    etaMin={driverEta.etaMin}
+                                    loading={!route}
+                                    selected={selected?.code === o.code}
+                                    onPress={() => setSelectedId(o.code)}
+                                />
+                            </Animated.View>
                         ))}
                 </ScrollView>
 
@@ -754,7 +1116,6 @@ export default function OrderStep({
                     )}
 
                     <View style={s.payLine}>
-                        {/* ✅ TOMBOL PAYMENT — BUKA MODAL */}
                         <Pressable
                             style={{ flexShrink: 1 }}
                             onPress={() => setShowPaymentModal(true)}
@@ -823,24 +1184,35 @@ export default function OrderStep({
                     </View>
 
                     <Pressable
-                        disabled={!canOrder || !selected}
+                        disabled={!canOrder || !selected || submitting}
                         onPress={handleOrder}
                         style={[
                             s.cta,
                             {
                                 opacity:
-                                    canOrder && selected ? 1 : 0.6,
+                                    canOrder && selected && !submitting
+                                        ? 1
+                                        : 0.6,
                             },
                         ]}
                     >
                         <Text style={s.ctaText} numberOfLines={1}>
-                            Cari {selected?.label ?? 'kendaraan'}
+                            {submitting
+                                ? 'Memproses pesanan…'
+                                : `Cari ${selected?.label ?? 'kendaraan'}`}
                         </Text>
-                        <Text style={s.ctaPrice}>
-                            {route && selected
-                                ? formatRupiah(priceOf(selected))
-                                : '…'}
-                        </Text>
+                        {submitting ? (
+                            <ActivityIndicator
+                                color="#fff"
+                                style={{ marginRight: 4 }}
+                            />
+                        ) : (
+                            <Text style={s.ctaPrice}>
+                                {route && selected
+                                    ? formatRupiah(priceOf(selected))
+                                    : '…'}
+                            </Text>
+                        )}
                         <View style={s.ctaArrow}>
                             <Ionicons
                                 name="arrow-forward"
@@ -852,9 +1224,7 @@ export default function OrderStep({
                 </View>
             </Animated.View>
 
-            {/* ============================================================
-                MODAL: Pilih Metode Pembayaran
-            ============================================================ */}
+            {/* MODAL: Pilih Metode Pembayaran */}
             <Modal
                 visible={showPaymentModal}
                 transparent
@@ -896,7 +1266,7 @@ export default function OrderStep({
                         <PaymentOption
                             icon="wallet"
                             color={CYAN}
-                            title="Saldo Waruung"
+                            title="Saldo LinkU"
                             subtitle={`Saldo: ${formatRupiah(
                                 customerBalance
                             )}`}
@@ -955,9 +1325,7 @@ export default function OrderStep({
                 </View>
             </Modal>
 
-            {/* ============================================================
-                MODAL: Pilih Bank (untuk VA)
-            ============================================================ */}
+            {/* MODAL: Pilih Bank */}
             <Modal
                 visible={showBankModal}
                 transparent
@@ -1022,6 +1390,8 @@ export default function OrderStep({
                     </View>
                 </View>
             </Modal>
+
+            <LoadingModal visible={submitting} />
         </GestureHandlerRootView>
     );
 }

@@ -190,7 +190,7 @@ export default function TripSummaryStep({
                     </View>
                     <Text style={s.headerTitle}>Paket berhasil dikirim!</Text>
                     <Text style={s.headerSub}>
-                        Terima kasih sudah menggunakan Waruung
+                        Terima kasih sudah menggunakan LinkU
                     </Text>
                 </Animated.View>
 

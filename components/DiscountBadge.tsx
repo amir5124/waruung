@@ -4,7 +4,7 @@ type Props = {
     label?: string;
 };
 
-export default function DiscountBadge({ label = '10% off' }: Props) {
+export default function DiscountBadge({ label = 'Baru' }: Props) {
     return (
         <View style={styles.wrapper}>
             <View style={styles.badge}>
