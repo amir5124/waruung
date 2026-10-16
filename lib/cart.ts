@@ -2,7 +2,7 @@
 import { create } from 'zustand';
 
 export type CartItem = {
-    id: number;                  // ← number, match dengan menu_item_id
+    id: number;
     name: string;
     price: number;
     image_url: string | null;
@@ -15,11 +15,19 @@ export type CartItem = {
 type CartState = {
     items: CartItem[];
     merchantId: string | null;
+
+    /** ✅ Catatan umum untuk seluruh order (mis. "jangan pakai sambal") */
+    generalNote: string;
+
     add: (it: Omit<CartItem, 'qty'>) => void;
     inc: (id: number) => void;
     dec: (id: number) => void;
     remove: (id: number) => void;
     setNote: (id: number, note: string) => void;
+
+    /** ✅ Set catatan umum */
+    setGeneralNote: (note: string) => void;
+
     clear: () => void;
     totalQty: () => number;
     totalPrice: () => number;
@@ -28,13 +36,15 @@ type CartState = {
 export const useCart = create<CartState>((set, get) => ({
     items: [],
     merchantId: null,
+    generalNote: '',
 
     add: (it) =>
         set((st) => {
-            // Beda resto → reset keranjang
+            // Beda resto → reset keranjang + generalNote
             if (st.merchantId && st.merchantId !== it.merchantId) {
                 return {
                     merchantId: it.merchantId,
+                    generalNote: '',
                     items: [{ ...it, qty: 1 }],
                 };
             }
@@ -72,8 +82,16 @@ export const useCart = create<CartState>((set, get) => ({
             items: st.items.map((x) => (x.id === id ? { ...x, note } : x)),
         })),
 
-    clear: () => set({ items: [], merchantId: null }),
+    setGeneralNote: (note) => set({ generalNote: note }),
+
+    clear: () =>
+        set({
+            items: [],
+            merchantId: null,
+            generalNote: '',
+        }),
 
     totalQty: () => get().items.reduce((a, b) => a + b.qty, 0),
-    totalPrice: () => get().items.reduce((a, b) => a + b.price * b.qty, 0),
+    totalPrice: () =>
+        get().items.reduce((a, b) => a + b.price * b.qty, 0),
 }));

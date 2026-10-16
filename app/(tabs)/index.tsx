@@ -14,6 +14,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useWalletBalance } from '@/hooks/use-wallet-balance';
+import { useCart } from '@/lib/cart';
 import ActiveOrderBanner from '../../components/ActiveOrderBanner';
 import AppAlert from '../../components/AppAlert';
 import BannerCarousel from '../../components/BannerCarousel';
@@ -30,7 +31,6 @@ import { api, type PublicAsset } from '../../lib/api';
 // ============================================================
 const DEFAULT_LOCATION = 'Jl Soekarno Hatta Malang, Jawa...';
 
-// ✅ Pakai PREFIX key — TANPA fallbackIcon
 const SERVICE_MAP: Array<{
   keyPrefix: string;
   label: string;
@@ -81,9 +81,22 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [recoKey, setRecoKey] = useState(0);
 
-  const [alertVisible, setAlertVisible] = useState(false);
-  const [alertTitle, setAlertTitle] = useState('');
-  const [alertMessage, setAlertMessage] = useState('');
+  // Alert state — pakai AppAlert (bukan Alert.alert)
+  const [alertState, setAlertState] = useState<{
+    visible: boolean;
+    title: string;
+    message: string;
+  }>({
+    visible: false,
+    title: '',
+    message: '',
+  });
+
+  const showAlert = (title: string, message: string) =>
+    setAlertState({ visible: true, title, message });
+
+  const hideAlert = () =>
+    setAlertState((a) => ({ ...a, visible: false }));
 
   // Banner dari backend
   const [banners, setBanners] = useState<PublicAsset[]>([]);
@@ -92,6 +105,10 @@ export default function HomeScreen() {
   const [serviceIcons, setServiceIcons] = useState<
     Record<string, string>
   >({});
+
+  // ✅ CART — jumlah item di keranjang
+  const cart = useCart();
+  const cartCount = cart.totalQty();
 
   const { balance, refresh } = useWalletBalance({
     pollInterval: 30_000,
@@ -115,7 +132,9 @@ export default function HomeScreen() {
       });
 
       // ✅ REVERSE: backend kirim terbaru dulu → kita mau terlama dulu
-      const orderedBanners = [...(bannerRes.items ?? [])].reverse();
+      const orderedBanners = [
+        ...(bannerRes.items ?? []),
+      ].reverse();
 
       console.log(
         '[HOME] banners loaded:',
@@ -143,15 +162,20 @@ export default function HomeScreen() {
 
       // Debug prefix matching
       SERVICE_MAP.forEach((s) => {
-        const found = findIconByPrefix(iconMap, s.keyPrefix);
+        const found = findIconByPrefix(
+          iconMap,
+          s.keyPrefix
+        );
         console.log(
           `[HOME] ${s.label} (${s.keyPrefix}):`,
           found ? `✅` : '⚠️ fallback'
         );
       });
     } catch (e: any) {
-      console.warn('[HOME] fetch assets gagal:', e?.message);
-      // Tidak ada fallback — biarkan kosong
+      console.warn(
+        '[HOME] fetch assets gagal:',
+        e?.message
+      );
       setBanners([]);
       setServiceIcons({});
     }
@@ -170,9 +194,10 @@ export default function HomeScreen() {
         return;
       }
 
-      const position = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
+      const position =
+        await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
 
       const { latitude, longitude } = position.coords;
 
@@ -191,7 +216,9 @@ export default function HomeScreen() {
 
         const formatted = parts.join(', ');
         setLocationText(
-          formatted.length > 0 ? formatted : DEFAULT_LOCATION
+          formatted.length > 0
+            ? formatted
+            : DEFAULT_LOCATION
         );
       } else {
         setLocationText(DEFAULT_LOCATION);
@@ -245,6 +272,17 @@ export default function HomeScreen() {
   };
 
   // ============================================================
+  // ✅ HANDLER TOMBOL KERANJANG
+  // ============================================================
+  const goToCart = () => {
+    console.log(
+      '[HOME] Buka keranjang, items:',
+      cartCount
+    );
+    router.push('/keranjang' as any);
+  };
+
+  // ============================================================
   // RENDER
   // ============================================================
   return (
@@ -287,19 +325,34 @@ export default function HomeScreen() {
               />
             </Pressable>
 
-            <Pressable style={styles.bellButton}>
+            {/* ✅ Tombol keranjang */}
+            <Pressable
+              style={styles.cartButton}
+              onPress={goToCart}
+              hitSlop={8}
+            >
               <Ionicons
-                name="notifications-outline"
-                size={24}
+                name="cart-outline"
+                size={26}
                 color="#1B1B1B"
               />
-              <View style={styles.dot} />
+              {cartCount > 0 && (
+                <View style={styles.cartBadge}>
+                  <Text
+                    style={styles.cartBadgeText}
+                  >
+                    {cartCount > 99
+                      ? '99+'
+                      : cartCount}
+                  </Text>
+                </View>
+              )}
             </Pressable>
           </View>
 
           <ActiveOrderBanner />
 
-          {/* ✅ Banner — TANPA fallback, hanya tampil kalau ada dari backend */}
+          {/* Banner — dari backend */}
           {banners.length > 0 && (
             <BannerCarousel
               images={banners.map((b) => b.url)}
@@ -310,22 +363,32 @@ export default function HomeScreen() {
             balance={balance}
             coins={0}
             badgeCount={8}
-            onPressAdd={() => router.push('/topup' as any)}
-            onPressTopup={() => router.push('/topup' as any)}
-            onPressWithdraw={() => router.push('/tarik' as any)}
-            onPressHistory={() => router.push('/riwayat' as any)}
-            onPressMore={() => router.push('/lainnya' as any)}
+            onPressAdd={() =>
+              router.push('/topup' as any)
+            }
+            onPressTopup={() =>
+              router.push('/topup' as any)
+            }
+            onPressWithdraw={() =>
+              router.push('/tarik' as any)
+            }
+            onPressHistory={() =>
+              router.push('/riwayat' as any)
+            }
+            onPressMore={() =>
+              router.push('/lainnya' as any)
+            }
           />
 
-          {/* ✅ Services — TANPA fallback, hanya yang punya icon dari backend */}
+          {/* Services — dari backend */}
           <View style={styles.serviceRow}>
             {SERVICE_MAP.map((service) => {
-              const remoteUrl = findIconByPrefix(
-                serviceIcons,
-                service.keyPrefix
-              );
+              const remoteUrl =
+                findIconByPrefix(
+                  serviceIcons,
+                  service.keyPrefix
+                );
 
-              // Skip kalau tidak ada icon di backend
               if (!remoteUrl) return null;
 
               return (
@@ -349,11 +412,12 @@ export default function HomeScreen() {
 
       <LoadingModal visible={loadingLocation} />
 
+      {/* ✅ AppAlert */}
       <AppAlert
-        visible={alertVisible}
-        title={alertTitle}
-        message={alertMessage}
-        onClose={() => setAlertVisible(false)}
+        visible={alertState.visible}
+        title={alertState.title}
+        message={alertState.message}
+        onClose={hideAlert}
       />
     </View>
   );
@@ -393,7 +457,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#1B1B1B',
   },
-  bellButton: {
+
+  // Tombol keranjang
+  cartButton: {
     width: 52,
     height: 52,
     borderRadius: 26,
@@ -405,16 +471,29 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
     elevation: 4,
+    position: 'relative',
   },
-  dot: {
+  cartBadge: {
     position: 'absolute',
-    top: 11,
-    right: 13,
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#E53935',
+    top: 4,
+    right: 4,
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#DC2626',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+    borderWidth: 2,
+    borderColor: '#fff',
   },
+  cartBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '800',
+    lineHeight: 14,
+  },
+
   serviceRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',

@@ -86,7 +86,7 @@ function getPaymentLabel(m: PaymentMethod, bankLabel?: string) {
         case 'cash':
             return 'Tunai';
         case 'wallet':
-            return 'Saldo LinkU';
+            return 'Saldo Waruung';
         case 'qris':
             return 'QRIS';
         case 'bank_transfer':
@@ -855,7 +855,7 @@ export default function Checkout() {
                         <PaymentOption
                             icon="wallet"
                             color={CYAN}
-                            title="Saldo LinkU"
+                            title="Saldo Waruung"
                             subtitle={`Saldo: ${fmtRp(customerBalance)}`}
                             selected={draftMethod === 'wallet'}
                             disabled={!isSaldoEnough}

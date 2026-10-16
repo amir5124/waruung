@@ -581,6 +581,7 @@ export default function RootLayout() {
                   name="promo"
                   options={{ headerShown: false }}
                 />
+                <Stack.Screen name="keranjang" options={{ headerShown: false }} />
 
                 {/* Chat */}
                 <Stack.Screen name="chat/[roomId]" />

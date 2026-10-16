@@ -312,7 +312,7 @@ export default function PembayaranScreen() {
             <View style={[s.footer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
                 {expired ? (
                     <Pressable style={s.primaryBtn} onPress={() => router.replace('/(tabs)' as any)}>
-                        <Text style={s.primaryBtnText}>Kembali ke beranda</Text>
+                        <Text style={s.primaryBtnText}>Kembali</Text>
                     </Pressable>
                 ) : (
                     <Pressable style={s.cancelBtn} onPress={cancelOrder} disabled={cancelling}>

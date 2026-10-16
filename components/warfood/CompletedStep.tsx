@@ -142,7 +142,7 @@ export default function CompletedStep({ order, onRate, onDone }: Props) {
                 </Animated.View>
 
                 {/* ===== Tip ===== */}
-                <Animated.View entering={FadeInUp.delay(330).duration(300)} style={s.card}>
+                {/* <Animated.View entering={FadeInUp.delay(330).duration(300)} style={s.card}>
                     <Text style={s.cardTitle}>
                         Beri tip untuk driver <Text style={s.optional}>(opsional)</Text>
                     </Text>
@@ -156,7 +156,7 @@ export default function CompletedStep({ order, onRate, onDone }: Props) {
                             );
                         })}
                     </View>
-                </Animated.View>
+                </Animated.View> */}
 
                 {/* ===== Ringkasan ===== */}
                 <Animated.View entering={FadeInUp.delay(410).duration(300)} style={s.card}>

@@ -13,7 +13,6 @@ import { AntDesign, Ionicons } from '@expo/vector-icons';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
-    Alert,
     Image,
     Modal,
     Pressable,
@@ -41,6 +40,8 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CircleButton, MAP_PROVIDER } from './parts';
 
+// ✅ Pakai LoadingModal + AppAlert yang sama
+import AppAlert from '@/components/AppAlert';
 import LoadingModal from '@/components/LoadingModal';
 
 // ============================================================
@@ -62,6 +63,12 @@ type Props = {
 };
 
 type PaymentMethod = 'cash' | 'wallet' | 'qris' | 'bank_transfer';
+
+type AlertButton = {
+    text: string;
+    onPress?: () => void;
+    style?: 'default' | 'cancel' | 'destructive';
+};
 
 type DriverPoint = {
     id: string;
@@ -92,11 +99,10 @@ const GREEN = '#16A34A';
 const DRIVER_ICON_SIZE = 40;
 const MAX_DRIVER_MARKERS = 30;
 
+// ✅ Minimal VA LinkQu
+const VA_MIN_AMOUNT = 10000;
+
 // ---- Pengaturan zoom to fit ----
-// FIT_ZOOM_OUT  : 1 = rute pas memenuhi area terlihat; makin besar makin jauh (coba 1.3 – 2.5)
-// FIT_MIN_DELTA : batas zoom terdekat (derajat). Rute sangat pendek tidak akan lebih dekat dari ini.
-//                 0.012 ≈ 1,3 km tinggi layar. Naikkan kalau masih terlalu dekat.
-// FIT_SIDE_PAD  : jarak kiri/kanan (px) antara rute dan tepi layar
 const FIT_ZOOM_OUT = 1.5;
 const FIT_MIN_DELTA = 0.012;
 const FIT_SIDE_PAD = 50;
@@ -124,10 +130,6 @@ function isValidCoords(c: any): boolean {
     );
 }
 
-/**
- * Normalisasi data driver dari hook (toleran terhadap beberapa bentuk field):
- * { id, coords: { latitude, longitude } } | { latitude, longitude } | { lat, lng } | { lat, lon }
- */
 function toDriverPoint(d: any, i: number): DriverPoint | null {
     if (!d) return null;
     const lat = Number(
@@ -151,7 +153,7 @@ function getPaymentLabel(method: PaymentMethod, bankLabel?: string): string {
         case 'cash':
             return 'Tunai';
         case 'wallet':
-            return 'Saldo LinkU';
+            return 'Saldo Waruung';
         case 'qris':
             return 'QRIS';
         case 'bank_transfer':
@@ -203,9 +205,6 @@ function RouteDot({ type }: { type: 'origin' | 'destination' }) {
     );
 }
 
-// ============================================================
-// DRIVER MARKER — icon dari DB (motor_map / mobil_map)
-// ============================================================
 const DriverMarker = React.memo(function DriverMarker({
     driver,
     iconUri,
@@ -215,15 +214,13 @@ const DriverMarker = React.memo(function DriverMarker({
     iconUri?: string;
     fallback: any;
 }) {
-    // tracksViewChanges true dulu supaya gambar remote sempat ter-render,
-    // lalu dimatikan agar hemat performa.
     const [tracks, setTracks] = useState(true);
     const [failed, setFailed] = useState(false);
 
     useEffect(() => {
         setTracks(true);
         setFailed(false);
-        const t = setTimeout(() => setTracks(false), 1500); // jaga-jaga onLoadEnd tidak terpanggil
+        const t = setTimeout(() => setTracks(false), 1500);
         return () => clearTimeout(t);
     }, [iconUri]);
 
@@ -273,6 +270,7 @@ function PaymentOption({
     return (
         <Pressable
             onPress={onPress}
+            disabled={disabled}
             style={[
                 s.payOpt,
                 selected && {
@@ -380,9 +378,6 @@ function TariffSkeletonList({ count = 3 }: { count?: number }) {
     );
 }
 
-// ============================================================
-// OPTION ROW — dengan ETA real
-// ============================================================
 function OptionRow({
     option,
     service,
@@ -401,9 +396,7 @@ function OptionRow({
     onPress: () => void;
 }) {
     const etaLabel =
-        etaMin != null
-            ? `${etaMin} mnt`
-            : `± ${option.eta_min} mnt`;
+        etaMin != null ? `${etaMin} mnt` : `± ${option.eta_min} mnt`;
 
     return (
         <Pressable
@@ -429,14 +422,8 @@ function OptionRow({
                 <View style={s.meta}>
                     <Text style={s.eta}>{etaLabel}</Text>
                     <View style={s.dot} />
-                    <Ionicons
-                        name="person"
-                        size={12}
-                        color={colors.textMuted}
-                    />
-                    <Text style={s.metaText}>
-                        {option.capacity} penumpang
-                    </Text>
+                    <Ionicons name="person" size={12} color={colors.textMuted} />
+                    <Text style={s.metaText}>{option.capacity} penumpang</Text>
                 </View>
                 {!!option.desc_text && (
                     <Text style={s.optionDesc}>{option.desc_text}</Text>
@@ -483,6 +470,37 @@ export default function OrderStep({
     const [mapReady, setMapReady] = useState(false);
 
     // ============================================================
+    // ✅ ALERT STATE — pakai AppAlert (bukan Alert.alert)
+    // ============================================================
+    const [alertState, setAlertState] = useState<{
+        visible: boolean;
+        title: string;
+        message: string;
+        buttons?: AlertButton[];
+    }>({
+        visible: false,
+        title: '',
+        message: '',
+        buttons: undefined,
+    });
+
+    const showAlert = (
+        title: string,
+        message: string,
+        buttons?: AlertButton[]
+    ) => {
+        setAlertState({ visible: true, title, message, buttons });
+    };
+
+    const hideAlert = () =>
+        setAlertState((a) => ({ ...a, visible: false }));
+
+    // ============================================================
+    // ✅ LOADING STATE — loading tambahan untuk redirect payment
+    // ============================================================
+    const [redirecting, setRedirecting] = useState(false);
+
+    // ============================================================
     // ETA REAL + DRIVER ONLINE
     // ============================================================
     const driverEta = useDriverEta(origin?.coords ?? null, {
@@ -496,7 +514,7 @@ export default function OrderStep({
     // ICON MARKER DARI DATABASE (motor_map / mobil_map)
     // ============================================================
     const { icons: markerIcons } = useMapMarkers();
-    const driverMarkerKey = `${service}_map`; // 'motor_map' | 'mobil_map'
+    const driverMarkerKey = `${service}_map`;
     const driverIconUri = pickMarkerIcon(markerIcons, driverMarkerKey);
 
     const driverPoints = useMemo<DriverPoint[]>(() => {
@@ -506,20 +524,6 @@ export default function OrderStep({
             .filter((d): d is DriverPoint => d !== null)
             .slice(0, MAX_DRIVER_MARKERS);
     }, [driverEta]);
-
-    // DEBUG — hapus kalau marker driver sudah muncul
-    useEffect(() => {
-        console.log(
-            '[OrderStep] drivers raw:',
-            (driverEta as any)?.drivers?.length,
-            '| points:',
-            driverPoints.length,
-            '| iconKey:',
-            driverMarkerKey,
-            '| iconUri:',
-            driverIconUri ? 'ada' : 'kosong (pakai fallback lokal)'
-        );
-    }, [driverEta, driverPoints.length, driverMarkerKey, driverIconUri]);
 
     // ============================================================
     // PAYMENT STATE
@@ -550,16 +554,10 @@ export default function OrderStep({
         };
     }, []);
 
-    // ============================================================
-    // SYNC serviceType dari parent
-    // ============================================================
     useEffect(() => {
         setService(serviceType);
     }, [serviceType]);
 
-    // ============================================================
-    // TARIF dari backend
-    // ============================================================
     const { tariffs, loading: tariffsLoading, calcPrice } = useTariffs(service);
 
     const filteredTariffs = useMemo(() => {
@@ -586,7 +584,6 @@ export default function OrderStep({
         }
     }, [filteredTariffs, selectedId]);
 
-    // FETCH SALDO CUSTOMER
     useEffect(() => {
         (async () => {
             try {
@@ -687,13 +684,7 @@ export default function OrderStep({
         };
     }, [origin.coords, destination.coords, coordsValid]);
 
-    // ============================================================
-    // ZOOM TO FIT
-    //  - Menghitung area peta yang benar-benar terlihat
-    //    (di antara kartu asal-tujuan di atas dan bottom sheet di bawah)
-    //  - Rute diletakkan di tengah area terlihat tersebut
-    //  - Marker driver sengaja TIDAK ikut di-fit
-    // ============================================================
+    // ---- Zoom to fit ----
     const fit = useCallback(() => {
         const map = mapRef.current;
         if (!map) return;
@@ -706,7 +697,6 @@ export default function OrderStep({
 
         if (pts.length === 0) return;
 
-        // Hanya 1 titik valid → zoom ke titik itu
         if (pts.length === 1) {
             map.animateToRegion(
                 {
@@ -720,7 +710,6 @@ export default function OrderStep({
             return;
         }
 
-        // Batas area rute
         const lats = pts.map((p) => p.latitude);
         const lngs = pts.map((p) => p.longitude);
         const minLat = Math.min(...lats);
@@ -730,13 +719,11 @@ export default function OrderStep({
         const routeCenterLat = (minLat + maxLat) / 2;
         const routeCenterLng = (minLng + maxLng) / 2;
 
-        // Area peta yang terlihat (px)
-        const topInset = insets.top + 130; // kartu asal-tujuan
-        const bottomInset = EXPANDED + 20; // bottom sheet
+        const topInset = insets.top + 130;
+        const bottomInset = EXPANDED + 20;
         const visibleH = Math.max(height - topInset - bottomInset, 200);
         const visibleW = Math.max(width - FIT_SIDE_PAD * 2, 150);
 
-        // Delta total peta (seluruh layar) supaya rute muat di area terlihat
         const latDelta = Math.max(
             (maxLat - minLat) * FIT_ZOOM_OUT * (height / visibleH),
             FIT_MIN_DELTA
@@ -746,7 +733,6 @@ export default function OrderStep({
             FIT_MIN_DELTA * (width / height)
         );
 
-        // Geser pusat peta agar rute berada di tengah area terlihat
         const offsetPx = height / 2 - (topInset + visibleH / 2);
         const centerLat = routeCenterLat - (offsetPx / height) * latDelta;
 
@@ -769,8 +755,6 @@ export default function OrderStep({
         width,
     ]);
 
-    // Fit setelah map siap & rute tersedia (delay kecil agar layout map selesai,
-    // terutama di Android)
     useEffect(() => {
         if (!mapReady || !route) return;
         const t = setTimeout(fit, 250);
@@ -789,6 +773,19 @@ export default function OrderStep({
         calcPrice(t.code, route?.distanceMeters ?? 0);
 
     const currentPrice = selected ? priceOf(selected) : 0;
+
+    // ============================================================
+    // ✅ CEK APAKAH VA BISA DIPAKAI (minimal Rp 10.000)
+    // ============================================================
+    const canUseVA = currentPrice >= VA_MIN_AMOUNT;
+
+    useEffect(() => {
+        if (!canUseVA && paymentMethod === 'bank_transfer') {
+            setPaymentMethod('cash');
+            setBankCode(null);
+            setSelectedBankLabel('');
+        }
+    }, [canUseVA, paymentMethod]);
 
     // ---- Track quote ----
     useEffect(() => {
@@ -866,26 +863,60 @@ export default function OrderStep({
         !!selected;
 
     // ============================================================
-    // HANDLE ORDER
+    // HANDLE ORDER — pakai showAlert bukan Alert.alert
     // ============================================================
     const handleOrder = async () => {
         if (submittingRef.current) return;
         if (!route || !selected) return;
 
+        // ✅ Validasi saldo wallet — pakai showAlert
         if (paymentMethod === 'wallet' && !isSaldoEnough) {
-            Alert.alert(
+            showAlert(
                 'Saldo tidak cukup',
                 `Saldo kamu ${formatRupiah(
                     customerBalance
-                )}, butuh ${formatRupiah(currentPrice)}`
+                )}, butuh ${formatRupiah(currentPrice)}. Top up dulu atau pilih metode lain.`,
+                [
+                    { text: 'Tutup', style: 'cancel' },
+                    {
+                        text: 'Top Up',
+                        onPress: () => {
+                            hideAlert();
+                            // onPressTopup?.();
+                        },
+                    },
+                ]
             );
             return;
         }
 
+        // ✅ Validasi bank VA — pakai showAlert
         if (paymentMethod === 'bank_transfer' && !bankCode) {
-            Alert.alert(
+            showAlert(
                 'Bank belum dipilih',
-                'Pilih bank untuk transfer VA dulu.'
+                'Pilih bank untuk transfer VA dulu.',
+                [
+                    { text: 'Tutup', style: 'cancel' },
+                    {
+                        text: 'Pilih Bank',
+                        onPress: () => {
+                            hideAlert();
+                            setShowBankModal(true);
+                        },
+                    },
+                ]
+            );
+            return;
+        }
+
+        // ✅ Validasi minimum VA
+        if (paymentMethod === 'bank_transfer' && !canUseVA) {
+            showAlert(
+                'Minimal Rp 10.000',
+                `Transfer Bank (VA) minimal Rp 10.000. Total orderanmu ${formatRupiah(
+                    currentPrice
+                )}. Pilih metode lain atau tambah orderan.`,
+                [{ text: 'Mengerti' }]
             );
             return;
         }
@@ -909,6 +940,23 @@ export default function OrderStep({
                         ? bankCode
                         : undefined,
             });
+        } catch (err: any) {
+            // ✅ Error dari onOrder — pakai showAlert
+            console.warn('[OrderStep] onOrder gagal:', err?.message);
+            showAlert(
+                'Gagal membuat pesanan',
+                err?.message || 'Coba lagi sebentar.',
+                [
+                    { text: 'Tutup', style: 'cancel' },
+                    {
+                        text: 'Coba Lagi',
+                        onPress: () => {
+                            hideAlert();
+                            setTimeout(() => handleOrder(), 300);
+                        },
+                    },
+                ]
+            );
         } finally {
             submittingRef.current = false;
             if (mountedRef.current) setSubmitting(false);
@@ -958,7 +1006,6 @@ export default function OrderStep({
                     </>
                 )}
 
-                {/* Driver online — icon sesuai layanan (motor_map / mobil_map) */}
                 {driverPoints.map((d) => (
                     <DriverMarker
                         key={`${service}-${d.id}`}
@@ -1224,7 +1271,9 @@ export default function OrderStep({
                 </View>
             </Animated.View>
 
-            {/* MODAL: Pilih Metode Pembayaran */}
+            {/* ============================================================ */}
+            {/* MODAL: Pilih Metode Pembayaran                                */}
+            {/* ============================================================ */}
             <Modal
                 visible={showPaymentModal}
                 transparent
@@ -1266,7 +1315,7 @@ export default function OrderStep({
                         <PaymentOption
                             icon="wallet"
                             color={CYAN}
-                            title="Saldo LinkU"
+                            title="Saldo Waruung"
                             subtitle={`Saldo: ${formatRupiah(
                                 customerBalance
                             )}`}
@@ -1274,13 +1323,16 @@ export default function OrderStep({
                             disabled={customerBalance < currentPrice}
                             onPress={() => {
                                 if (customerBalance < currentPrice) {
-                                    Alert.alert(
+                                    // ✅ Pakai showAlert
+                                    setShowPaymentModal(false);
+                                    showAlert(
                                         'Saldo tidak cukup',
                                         `Saldo kamu ${formatRupiah(
                                             customerBalance
                                         )}, butuh ${formatRupiah(
                                             currentPrice
-                                        )}`
+                                        )}. Top up dulu atau pilih metode lain.`,
+                                        [{ text: 'Mengerti' }]
                                     );
                                     return;
                                 }
@@ -1305,27 +1357,60 @@ export default function OrderStep({
                             }}
                         />
 
+                        {/* ✅ VA DISABLED jika total < Rp 10.000 */}
                         <PaymentOption
                             icon="card-outline"
                             color={PURPLE}
                             title="Transfer Bank (VA)"
                             subtitle={
-                                bankCode
-                                    ? `VA ${selectedBankLabel}`
-                                    : 'BRI, BNI, Mandiri, BCA, dll'
+                                !canUseVA
+                                    ? `Minimal Rp 10.000 (total ${formatRupiah(
+                                        currentPrice
+                                    )})`
+                                    : bankCode
+                                        ? `VA ${selectedBankLabel}`
+                                        : 'BRI, BNI, Mandiri, BCA, dll'
                             }
                             selected={paymentMethod === 'bank_transfer'}
+                            disabled={!canUseVA}
                             onPress={() => {
+                                if (!canUseVA) {
+                                    setShowPaymentModal(false);
+                                    showAlert(
+                                        'Minimal Rp 10.000',
+                                        `Transfer Bank (VA) minimal Rp 10.000. Total orderanmu ${formatRupiah(
+                                            currentPrice
+                                        )}. Pilih metode lain atau tambah orderan dulu.`,
+                                        [{ text: 'Mengerti' }]
+                                    );
+                                    return;
+                                }
                                 setPaymentMethod('bank_transfer');
                                 setShowPaymentModal(false);
                                 setShowBankModal(true);
                             }}
                         />
+
+                        {/* Info minimum VA */}
+                        {!canUseVA && (
+                            <View style={s.vaHint}>
+                                <Ionicons
+                                    name="information-circle-outline"
+                                    size={14}
+                                    color={colors.textMuted}
+                                />
+                                <Text style={s.vaHintText}>
+                                    Transfer Bank (VA) minimal Rp 10.000
+                                </Text>
+                            </View>
+                        )}
                     </View>
                 </View>
             </Modal>
 
-            {/* MODAL: Pilih Bank */}
+            {/* ============================================================ */}
+            {/* MODAL: Pilih Bank                                             */}
+            {/* ============================================================ */}
             <Modal
                 visible={showBankModal}
                 transparent
@@ -1391,7 +1476,19 @@ export default function OrderStep({
                 </View>
             </Modal>
 
-            <LoadingModal visible={submitting} />
+            {/* ✅ Loading Modal untuk submitting & redirect */}
+            <LoadingModal visible={submitting || redirecting} />
+
+            {/* ✅ AppAlert untuk semua notifikasi */}
+            <AppAlert
+                visible={alertState.visible}
+                title={alertState.title}
+                message={alertState.message}
+                buttons={
+                    alertState.buttons ?? [{ text: 'OK' }]
+                }
+                onClose={hideAlert}
+            />
         </GestureHandlerRootView>
     );
 }
@@ -1704,6 +1801,20 @@ const s = StyleSheet.create({
         height: 11,
         borderRadius: 6,
         backgroundColor: colors.primary,
+    },
+
+    // ✅ Hint minimum VA
+    vaHint: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingHorizontal: 4,
+        paddingTop: 4,
+    },
+    vaHintText: {
+        fontSize: 12,
+        color: colors.textMuted,
+        fontStyle: 'italic',
     },
 
     // ===== Bank row =====

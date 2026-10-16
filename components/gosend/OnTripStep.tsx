@@ -1,6 +1,8 @@
+// components/gosend/OnTripStep.tsx
 import { mapStyle } from '@/constants/ojek-map-style';
 import { formatRupiah } from '@/constants/ojek-services';
 import { colors } from '@/constants/ojek-theme';
+import { pickMarkerIcon, useMapMarkers } from '@/hooks/use-map-markers';
 import { getRoute } from '@/services/google-maps';
 import type { DriverInfo, PackageInfo, PlaceLoc } from '@/types/gosend';
 import type { RouteInfo } from '@/types/ojek';
@@ -30,9 +32,7 @@ type LatLng = { latitude: number; longitude: number };
 type Props = {
     origin: PlaceLoc;
     destination: PlaceLoc;
-    /** driver.coords harus diperbarui realtime oleh parent (polling) */
     driver: DriverInfo & { coords?: LatLng | null };
-    /** status order dari backend (opsional): 'in_progress' | 'completed' */
     status?: string;
     securityCode?: string | null;
     receiveCode: boolean;
@@ -40,12 +40,14 @@ type Props = {
     price?: number;
     optionName?: string;
     onBack: () => void;
-    /** dipanggil sekali saat status order menjadi 'completed' */
     onArrived?: () => void;
     onChat?: () => void;
     onCall?: () => void;
 };
 
+// ============================================================
+// FALLBACK ASSETS — kalau backend kosong / error
+// ============================================================
 const MARKER_IMG: Record<string, any> = {
     kurir: require('@/assets/images/kurir-map.png'),
     motor: require('@/assets/images/kurir-map.png'),
@@ -55,24 +57,28 @@ const MARKER_IMG: Record<string, any> = {
 const DEFAULT_MARKER = MARKER_IMG.kurir;
 const MARKER_DEST = require('@/assets/images/marker-destination.png');
 
-function getMarkerImage(vehicleType?: string | null) {
+// ============================================================
+// KEY PREFIX untuk icon marker di DB (kategori: marker)
+// ============================================================
+const VEHICLE_KEY_PREFIX: Record<string, string> = {
+    kurir: 'kurir_map',
+    motor: 'motor_map',
+    mobil: 'mobil_map',
+    motor_food: 'food_map',
+};
+
+function getFallbackMarker(vehicleType?: string | null) {
     if (!vehicleType) return DEFAULT_MARKER;
     return MARKER_IMG[vehicleType.toLowerCase()] ?? DEFAULT_MARKER;
 }
 
 // Sedikit lebih pendek dari interval polling (3000 ms) di parent
 const MARKER_ANIM_MS = 2800;
-// Driver dianggap keluar jalur jika > 150 m dari polyline
 const OFF_ROUTE_METERS = 150;
-// Jeda minimum antar pengambilan ulang rute
 const REROUTE_MIN_INTERVAL_MS = 15000;
-// Dianggap dekat tujuan jika sisa jarak <= 30 m
 const NEAR_METERS = 30;
-// Abaikan gerak kecil (jitter GPS) untuk arah ikon
 const HEADING_MIN_METERS = 5;
-// 0 jika gambar menghadap ke atas (utara). Ubah (90/180/-90) bila perlu.
 const ICON_HEADING_OFFSET = 0;
-// Kamera mengikuti driver
 const FOLLOW_ZOOM = 16;
 const FOLLOW_START_DELAY_MS = 2500;
 
@@ -113,7 +119,8 @@ function nearestIndex(polyline: LatLng[], pos: LatLng): number {
 
 function bearing(a: LatLng, b: LatLng): number {
     const y =
-        Math.sin(toRad(b.longitude - a.longitude)) * Math.cos(toRad(b.latitude));
+        Math.sin(toRad(b.longitude - a.longitude)) *
+        Math.cos(toRad(b.latitude));
     const x =
         Math.cos(toRad(a.latitude)) * Math.sin(toRad(b.latitude)) -
         Math.sin(toRad(a.latitude)) *
@@ -141,6 +148,64 @@ const sizeLabel = (size?: string | null) =>
             ? 'Kecil'
             : size.charAt(0).toUpperCase() + size.slice(1);
 
+// ============================================================
+// DRIVER MARKER — icon dari API + fallback lokal
+// ============================================================
+function DriverMarker({
+    coordinate,
+    rotation,
+    iconUri,
+    fallback,
+}: {
+    coordinate: AnimatedRegion;
+    rotation: number;
+    iconUri?: string;
+    fallback: any;
+}) {
+    const [tracks, setTracks] = useState(true);
+    const [failed, setFailed] = useState(false);
+
+    // Reset state saat iconUri berubah
+    useEffect(() => {
+        setTracks(true);
+        setFailed(false);
+        const t = setTimeout(() => setTracks(false), 1500);
+        return () => clearTimeout(t);
+    }, [iconUri]);
+
+    // ✅ Kalau iconUri kosong atau gagal load → pakai fallback lokal
+    const source = iconUri && !failed ? { uri: iconUri } : fallback;
+
+    return (
+        <MarkerAnimated
+            coordinate={coordinate}
+            anchor={{ x: 0.5, y: 0.5 }}
+            flat
+            rotation={rotation}
+            tracksViewChanges={tracks}
+            zIndex={2}
+        >
+            <View style={s.driverMarker}>
+                <Image
+                    source={source}
+                    style={{ width: 34, height: 34 }}
+                    resizeMode="contain"
+                    onLoadEnd={() => setTracks(false)}
+                    onError={() => {
+                        console.warn(
+                            '[GoSend OnTrip] 🟡 icon driver error → fallback lokal'
+                        );
+                        setFailed(true);
+                    }}
+                />
+            </View>
+        </MarkerAnimated>
+    );
+}
+
+// ============================================================
+// MAIN COMPONENT
+// ============================================================
 export default function OnTripStep({
     origin,
     destination,
@@ -161,17 +226,14 @@ export default function OnTripStep({
 
     const SHEET_H = (receiveCode ? 380 : 320) + insets.bottom;
 
-    // Posisi driver realtime (fallback ke titik jemput bila belum ada)
     const driverPos: LatLng = driver.coords ?? origin.coords;
 
     const [route, setRoute] = useState<RouteInfo | null>(null);
-    const [trackView, setTrackView] = useState(true);
 
     const fittedRef = useRef(false);
     const mountedRef = useRef(true);
     const reqRef = useRef(0);
     const lastRerouteRef = useRef(0);
-    // Jarak total awal, supaya progress tidak reset saat rute diambil ulang
     const baseTotalRef = useRef(0);
 
     const [following, setFollowing] = useState(true);
@@ -180,6 +242,31 @@ export default function OnTripStep({
     const onArrivedRef = useRef(onArrived);
     onArrivedRef.current = onArrived;
     const arrivedFiredRef = useRef(false);
+
+    // ============================================================
+    // ✅ ICON MARKER DARI DATABASE
+    // ============================================================
+    const { icons: markerIcons } = useMapMarkers();
+
+    // Tentukan prefix key berdasarkan vehicle type driver
+    const vehicleType = (driver.vehicleType ?? 'kurir').toLowerCase();
+    const markerKeyPrefix = VEHICLE_KEY_PREFIX[vehicleType] ?? 'kurir_map';
+    const driverIconUri = pickMarkerIcon(markerIcons, markerKeyPrefix);
+
+    // Fallback asset lokal
+    const fallbackMarker = getFallbackMarker(driver.vehicleType);
+
+    // Debug log
+    useEffect(() => {
+        console.log(
+            '[GoSend OnTrip] vehicle:',
+            vehicleType,
+            '| iconKey:',
+            markerKeyPrefix,
+            '| iconUri:',
+            driverIconUri ? '✅ ada' : '⚠️ fallback lokal'
+        );
+    }, [vehicleType, markerKeyPrefix, driverIconUri]);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -201,11 +288,13 @@ export default function OnTripStep({
                 }
             })
             .catch((err) =>
-                console.warn('[GoSend OnTrip] Gagal ambil rute:', err?.message)
+                console.warn(
+                    '[GoSend OnTrip] Gagal ambil rute:',
+                    err?.message
+                )
             );
     };
 
-    // Rute awal: titik jemput -> tujuan
     useEffect(() => {
         fetchRoute(origin.coords);
     }, [
@@ -224,7 +313,6 @@ export default function OnTripStep({
     );
     const last = polyline.length - 1;
 
-    // ---- Posisi driver pada polyline (REALTIME) ----
     const idx = useMemo(
         () => nearestIndex(polyline, driverPos),
         [polyline, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
@@ -244,7 +332,7 @@ export default function OnTripStep({
         }
     }, [driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ---- Marker driver: bergerak halus ----
+    // ---- Marker driver ----
     const driverCoord = useRef(
         new AnimatedRegion({
             latitude: driverPos.latitude,
@@ -258,7 +346,7 @@ export default function OnTripStep({
         animateMarker(driverCoord, driverPos, MARKER_ANIM_MS);
     }, [driverPos.latitude, driverPos.longitude, driverCoord]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ---- Arah ikon dari pergerakan terakhir ----
+    // ---- Arah ikon ----
     const [heading, setHeading] = useState(0);
     const prevPosRef = useRef<LatLng>(driverPos);
     useEffect(() => {
@@ -268,7 +356,7 @@ export default function OnTripStep({
         }
     }, [driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ---- Fit peta sekali saat rute pertama tiba ----
+    // ---- Fit peta ----
     const fit = () => {
         mapRef.current?.fitToCoordinates(polyline, {
             edgePadding: {
@@ -284,7 +372,10 @@ export default function OnTripStep({
         if (route && !fittedRef.current) {
             fittedRef.current = true;
             fit();
-            const t = setTimeout(() => setFollowReady(true), FOLLOW_START_DELAY_MS);
+            const t = setTimeout(
+                () => setFollowReady(true),
+                FOLLOW_START_DELAY_MS
+            );
             return () => clearTimeout(t);
         }
     }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -301,7 +392,10 @@ export default function OnTripStep({
     // ---- Sisa jarak, progress, ETA ----
     const remainingMeters = useMemo(() => {
         if (last < 0) return 0;
-        return haversine(driverPos, polyline[idx]) + remainingDistance(polyline, idx);
+        return (
+            haversine(driverPos, polyline[idx]) +
+            remainingDistance(polyline, idx)
+        );
     }, [polyline, idx, last, driverPos.latitude, driverPos.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const totalMeters = Math.max(
@@ -311,7 +405,10 @@ export default function OnTripStep({
         remainingMeters,
         1
     );
-    const progress = Math.min(1, Math.max(0, 1 - remainingMeters / totalMeters));
+    const progress = Math.min(
+        1,
+        Math.max(0, 1 - remainingMeters / totalMeters)
+    );
 
     const remainingKm = (remainingMeters / 1000).toFixed(1);
     const totalDistKm = (totalMeters / 1000).toFixed(1);
@@ -323,7 +420,6 @@ export default function OnTripStep({
     );
     const minutes = Math.max(1, Math.ceil(remainSec / 60));
 
-    // Dekat tujuan (berdasarkan jarak), selesai (berdasarkan status backend)
     const nearDestination = remainingMeters <= NEAR_METERS;
     const completed = status === 'completed';
 
@@ -337,9 +433,6 @@ export default function OnTripStep({
     const call = () =>
         onCall ? onCall() : Linking.openURL(`tel:${driver.phone}`);
 
-    const markerImg = getMarkerImage(driver.vehicleType);
-
-    // Jalur yang sudah dilewati & yang belum
     const passed = useMemo(
         () => [...polyline.slice(0, idx + 1), driverPos],
         [polyline, idx, driverPos.latitude, driverPos.longitude] // eslint-disable-line react-hooks/exhaustive-deps
@@ -359,7 +452,6 @@ export default function OnTripStep({
                 toolbarEnabled={false}
                 rotateEnabled={false}
                 onMapReady={fit}
-                // geser manual → berhenti mengikuti driver
                 onPanDrag={() => setFollowing(false)}
                 initialRegion={{
                     latitude: driverPos.latitude,
@@ -368,7 +460,6 @@ export default function OnTripStep({
                     longitudeDelta: 0.03,
                 }}
             >
-                {/* Jalur yang sudah dilewati */}
                 {passed.length > 1 && (
                     <Polyline
                         coordinates={passed}
@@ -379,7 +470,6 @@ export default function OnTripStep({
                     />
                 )}
 
-                {/* Jalur yang belum dilewati */}
                 {ahead.length > 1 && (
                     <>
                         <Polyline
@@ -408,24 +498,13 @@ export default function OnTripStep({
                     zIndex={1}
                 />
 
-                {/* Marker driver: realtime, berputar sesuai arah */}
-                <MarkerAnimated
+                {/* ✅ Marker driver dengan icon dari API + fallback */}
+                <DriverMarker
                     coordinate={driverCoord}
-                    anchor={{ x: 0.5, y: 0.5 }}
-                    flat
                     rotation={(heading + ICON_HEADING_OFFSET) % 360}
-                    tracksViewChanges={trackView}
-                    zIndex={2}
-                >
-                    <View style={s.driverMarker}>
-                        <Image
-                            source={markerImg}
-                            style={{ width: 34, height: 34 }}
-                            resizeMode="contain"
-                            onLoad={() => setTimeout(() => setTrackView(false), 150)}
-                        />
-                    </View>
-                </MarkerAnimated>
+                    iconUri={driverIconUri}
+                    fallback={fallbackMarker}
+                />
             </MapView>
 
             <Animated.View
@@ -449,7 +528,6 @@ export default function OnTripStep({
                 <CircleButton icon="arrow-back" onPress={onBack} />
             </View>
 
-            {/* Tombol pusatkan ke driver, muncul saat peta digeser manual */}
             {!following && (
                 <View style={[s.floatRecenter, { bottom: SHEET_H + 12 }]}>
                     <CircleButton
@@ -509,17 +587,27 @@ export default function OnTripStep({
                         <View
                             style={[
                                 s.progressFill,
-                                { width: `${Math.round(progress * 100)}%` },
+                                {
+                                    width: `${Math.round(
+                                        progress * 100
+                                    )}%`,
+                                },
                             ]}
                         />
                     </View>
 
                     <View style={s.driverRow}>
                         <View style={{ flex: 1 }}>
-                            <Text style={s.driverName} numberOfLines={1}>
+                            <Text
+                                style={s.driverName}
+                                numberOfLines={1}
+                            >
                                 {driver.name}
                             </Text>
-                            <Text style={s.driverPlate} numberOfLines={1}>
+                            <Text
+                                style={s.driverPlate}
+                                numberOfLines={1}
+                            >
                                 {driver.vehiclePlate}
                             </Text>
                         </View>
@@ -534,7 +622,11 @@ export default function OnTripStep({
                             onPress={call}
                             style={[s.iconBtn, s.iconBtnPrimary]}
                         >
-                            <Ionicons name="call" size={20} color="#fff" />
+                            <Ionicons
+                                name="call"
+                                size={20}
+                                color="#fff"
+                            />
                         </Pressable>
                     </View>
 
@@ -545,8 +637,14 @@ export default function OnTripStep({
                                 size={16}
                                 color={colors.textMuted}
                             />
-                            <Text style={s.infoText} numberOfLines={1}>
-                                {[packageInfo.type, sizeLabel(packageInfo.size)]
+                            <Text
+                                style={s.infoText}
+                                numberOfLines={1}
+                            >
+                                {[
+                                    packageInfo.type,
+                                    sizeLabel(packageInfo.size),
+                                ]
                                     .filter(Boolean)
                                     .join(' • ')}
                             </Text>
@@ -565,10 +663,14 @@ export default function OnTripStep({
                                         size={13}
                                         color={colors.primary}
                                     />
-                                    <Text style={s.payText}>Tunai</Text>
+                                    <Text style={s.payText}>
+                                        Tunai
+                                    </Text>
                                 </View>
                             </View>
-                            <Text style={s.farePrice}>{formatRupiah(price)}</Text>
+                            <Text style={s.farePrice}>
+                                {formatRupiah(price)}
+                            </Text>
                         </View>
                     )}
 
@@ -582,13 +684,17 @@ export default function OnTripStep({
                                 />
                             </View>
                             <View style={{ flex: 1 }}>
-                                <Text style={s.codeTitle}>Kode keamanan</Text>
+                                <Text style={s.codeTitle}>
+                                    Kode keamanan
+                                </Text>
                                 <Text style={s.codeSub}>
-                                    Cocokkan dengan driver sebelum serah terima
-                                    paket
+                                    Cocokkan dengan driver sebelum
+                                    serah terima paket
                                 </Text>
                             </View>
-                            <Text style={s.codeValue}>{securityCode || '—'}</Text>
+                            <Text style={s.codeValue}>
+                                {securityCode || '—'}
+                            </Text>
                         </View>
                     )}
                 </ScrollView>
@@ -597,6 +703,9 @@ export default function OnTripStep({
     );
 }
 
+// ============================================================
+// STYLES
+// ============================================================
 const s = StyleSheet.create({
     driverMarker: {
         width: 46,
@@ -619,7 +728,11 @@ const s = StyleSheet.create({
         shadowOffset: { width: 0, height: 3 },
     },
     routeRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-    routeLabel: { fontSize: 11, fontWeight: '700', color: colors.textMuted },
+    routeLabel: {
+        fontSize: 11,
+        fontWeight: '700',
+        color: colors.textMuted,
+    },
     routeText: {
         fontSize: 15,
         fontWeight: '700',
@@ -656,7 +769,11 @@ const s = StyleSheet.create({
         shadowOpacity: 0.12,
         shadowRadius: 10,
     },
-    handleArea: { alignItems: 'center', paddingTop: 10, paddingBottom: 12 },
+    handleArea: {
+        alignItems: 'center',
+        paddingTop: 10,
+        paddingBottom: 12,
+    },
     handle: {
         width: 40,
         height: 4,
@@ -669,8 +786,16 @@ const s = StyleSheet.create({
         gap: 12,
         marginBottom: 12,
     },
-    statusTitle: { fontSize: 17, fontWeight: '800', color: colors.text },
-    statusSub: { fontSize: 13, color: colors.textMuted, marginTop: 2 },
+    statusTitle: {
+        fontSize: 17,
+        fontWeight: '800',
+        color: colors.text,
+    },
+    statusSub: {
+        fontSize: 13,
+        color: colors.textMuted,
+        marginTop: 2,
+    },
     etaBox: {
         minWidth: 60,
         paddingVertical: 8,
@@ -685,7 +810,11 @@ const s = StyleSheet.create({
         color: colors.primary,
         lineHeight: 26,
     },
-    etaUnit: { fontSize: 12, fontWeight: '700', color: colors.primary },
+    etaUnit: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: colors.primary,
+    },
     progressTrack: {
         height: 6,
         borderRadius: 3,
@@ -707,8 +836,16 @@ const s = StyleSheet.create({
         backgroundColor: '#F5F6F8',
         marginBottom: 12,
     },
-    driverName: { fontSize: 15, fontWeight: '800', color: colors.text },
-    driverPlate: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+    driverName: {
+        fontSize: 15,
+        fontWeight: '800',
+        color: colors.text,
+    },
+    driverPlate: {
+        fontSize: 12,
+        color: colors.textMuted,
+        marginTop: 2,
+    },
     iconBtn: {
         width: 40,
         height: 40,
@@ -719,7 +856,10 @@ const s = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
-    iconBtnPrimary: { backgroundColor: colors.primary, borderWidth: 0 },
+    iconBtnPrimary: {
+        backgroundColor: colors.primary,
+        borderWidth: 0,
+    },
     infoRow: {
         flexDirection: 'row',
         alignItems: 'center',
@@ -741,10 +881,23 @@ const s = StyleSheet.create({
         borderBottomWidth: StyleSheet.hairlineWidth,
         borderColor: colors.border,
     },
-    fareLabel: { fontSize: 14, fontWeight: '700', color: colors.text },
-    payRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 3 },
+    fareLabel: {
+        fontSize: 14,
+        fontWeight: '700',
+        color: colors.text,
+    },
+    payRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 5,
+        marginTop: 3,
+    },
     payText: { fontSize: 13, color: colors.textMuted },
-    farePrice: { fontSize: 17, fontWeight: '800', color: colors.text },
+    farePrice: {
+        fontSize: 17,
+        fontWeight: '800',
+        color: colors.text,
+    },
     codeRow: {
         flexDirection: 'row',
         alignItems: 'center',
@@ -759,7 +912,11 @@ const s = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
-    codeTitle: { fontSize: 13, fontWeight: '700', color: colors.text },
+    codeTitle: {
+        fontSize: 13,
+        fontWeight: '700',
+        color: colors.text,
+    },
     codeSub: {
         fontSize: 11,
         color: colors.textMuted,
